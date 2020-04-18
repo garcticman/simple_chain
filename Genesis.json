@@ -1,0 +1,14 @@
+{
+ "Alloc": {
+  "084aeeff7e3494cf20d9f93d6f68d3d2d551652c6c877329af7b160de0d23c3c": 100000,
+  "09c9a49ec2c61b832212a85cc3e9b262a8edcf7ded0850c3ad0efe992eb9b0d8": 100000,
+  "30afdb958a187efb0a30be3a597dab39ac9814aacfbe1480ffa8b8bb10a911f9": 100000,
+  "548898eae6e00ed729304b36165202a047bc309883073cefd4c3aa2a7fe3d06a": 100000,
+  "5ad6763ac4bcfb4fe3de43e5a5a352d85fea584f3c907af67dd82f946671ea6b": 100000
+ },
+ "Validators": [
+  "OKwR+72S7opooBQ1KMKJfSgxFy3/eZLNkaVuUIRE4Lw=",
+  "VOwS4YC9pQ4jlGCQ7TVk2xmIeaCq7/ksxbAH30Y2BzE=",
+  "tbx54YleSsQoWGEjNnxLnavnbH7tgDKcW81PoaLFeKU="
+ ]
+}
