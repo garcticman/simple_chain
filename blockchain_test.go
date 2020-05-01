@@ -4,7 +4,10 @@ import (
 	"context"
 	"crypto"
 	"crypto/ed25519"
+	"errors"
+	"fmt"
 	"github.com/stretchr/testify/require"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -37,7 +40,7 @@ func InitForTest(numOfPeers, numOfValidators int) ([]*Node, error) {
 	}
 
 	var err error
-	for i := 0; i < 3; i++  {
+	for i := 0; i < 3; i++ {
 		peers[i], err = NewNode(keys[i], genesis)
 		if err != nil {
 			return nil, err
@@ -49,6 +52,68 @@ func InitForTest(numOfPeers, numOfValidators int) ([]*Node, error) {
 	return peers, nil
 }
 
+func TestBlockMessage(t *testing.T) {
+	peers, err := InitForTest(3, 3)
+	if err != nil {
+		t.Error(err)
+	}
+
+	block := Block{
+		BlockNum:      1,
+		Timestamp:     time.Now().Unix(),
+		Transactions:  nil,
+		BlockHash:     "",
+		PrevBlockHash: "",
+		StateHash:     "",
+		Signature:     nil,
+	}
+
+	logger := make(chan error, 1)
+
+	peers[1].BlockMessage(peers[0].address, block, logger, context.TODO())
+	if !reflect.DeepEqual(<-logger, ValidationError{address: peers[0].address, numOfBlock: block.BlockNum, error: errors.New("hashes not equal")}) {
+		t.Fail()
+	}
+
+	block.PrevBlockHash = peers[0].blocks[0].BlockHash
+	peers[0].state[peers[0].address] += 1000
+
+	bytes, _ := Bytes(peers[0].state)
+	block.StateHash, _ = Hash(bytes)
+	block.BlockHash, _ = block.Hash()
+	if err := block.SignBlock(peers[0].key); err != nil {
+		t.Error(err)
+	}
+
+	peers[1].BlockMessage(peers[0].address, block, logger, context.TODO())
+	select {
+	case <-logger:
+		t.Error(err)
+	default:
+	}
+	peers[2].BlockMessage(peers[0].address, block, logger, context.TODO())
+	select {
+	case <-logger:
+		t.Error(err)
+	default:
+	}
+
+	peers[2].BlockMessage(peers[1].address, peers[1].blocks[2], logger, context.TODO())
+	select {
+	case <-logger:
+		t.Error(err)
+	default:
+	}
+
+	if len(peers[2].blocks) != 4 {
+		t.Fail()
+	}
+
+	if peers[2].state[peers[0].address] != 2000 && peers[2].state[peers[1].address] != 2000 && peers[2].state[peers[2].address] != 2000 {
+		t.Fail()
+	}
+}
+
 func TestAmIValidatorNow(t *testing.T) {
 	peers, err := InitForTest(3, 3)
 	if err != nil {
@@ -58,13 +123,12 @@ func TestAmIValidatorNow(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		for _, peer := range peers {
 			if peer.AmIValidatorNow() {
-				block, err := peer.CreateBlock(peer.lastBlockNum+1, time.Now().Unix(), nil, peer.blocks[0].BlockHash)
 				if err != nil {
 					t.Error(err)
 				}
-				peers[0].insertBlock(block)
-				peers[1].insertBlock(block)
-				peers[2].insertBlock(block)
+				peers[0].blocks = append(peers[0].blocks, Block{})
+				peers[1].blocks = append(peers[1].blocks, Block{})
+				peers[2].blocks = append(peers[2].blocks, Block{})
 				break
 			}
 		}
@@ -76,54 +140,66 @@ func TestAmIValidatorNow(t *testing.T) {
 }
 
 func TestSync(t *testing.T) {
-		peers, err := InitForTest(3,3)
-		if err != nil {
-			t.Error(err)
-		}
-
-		for _, peer := range peers {
-			if peer.AmIValidatorNow() {
-				block, err := peer.CreateBlock(peer.lastBlockNum + 1, time.Now().Unix(), nil, peer.blocks[0].BlockHash)
-				if err != nil {
-					t.Error(err)
-				}
-				peer.insertBlock(block)
-				break
-			}
-		}
-
-		for i := 0; i < 3; i++ {
-			for j := i + 1; j < 3; j++ {
-				err := peers[i].AddPeer(peers[j])
-				if err != nil {
-					t.Error(err)
-				}
-			}
-		}
-
-		time.Sleep(time.Second)
-
-		require.Equal(t, peers[1].blocks[1], peers[0].blocks[1])
-		require.Equal(t, peers[2].blocks[1], peers[0].blocks[1])
-}
-
-func TestStartingBlockchain(t *testing.T) {
-	peers, err := InitForTest(5, 3)
+	peers, err := InitForTest(3, 3)
 	if err != nil {
 		t.Error(err)
 	}
 
+	for _, peer := range peers {
+		if peer.AmIValidatorNow() {
+			block, err := peer.CreateBlock(peer.lastBlockNum+1, time.Now().Unix(), nil, peer.blocks[0].BlockHash)
+			if err != nil {
+				t.Error(err)
+			}
+			peer.insertBlock(block)
+			break
+		}
+	}
+
+	for i := 0; i < 3; i++ {
+		for j := i + 1; j < 3; j++ {
+			err := peers[i].AddPeer(peers[j])
+			if err != nil {
+				t.Error(err)
+			}
+		}
+	}
+
+	time.Sleep(time.Second * 10)
+
+	require.Equal(t, peers[1].blocks[1], peers[0].blocks[1])
+	require.Equal(t, peers[2].blocks[1], peers[0].blocks[1])
+}
+
+func TestStartingBlockchain(t *testing.T) {
+	var err error
+
+	peers := make([]*Node, 5)
+	for i := 0; i < 5; i++ {
+
+		peers[i], err = MyNode(fmt.Sprintf("peer_%d", i))
+
+		peers[i].insertGenesis()
+	}
+
+	for i := 0; i < len(peers); i++ {
+		for j := i + 1; j < len(peers); j++ {
+			err = peers[i].AddPeer(peers[j])
+			if err != nil {
+				t.Error(err)
+			}
+		}
+	}
+
 	for _, node := range peers {
 
-		id := node.GetValidatorId()
-
-		if id == 0 {
+		if node.AmIValidatorNow() {
 			transactions, err := node.PrepareTransactions()
 			if err != nil {
 				t.Error(err)
 			}
 
-			block, err := node.CreateBlock(node.lastBlockNum + 1, time.Now().Unix(), transactions, node.GetBlockByNumber(node.lastBlockNum).BlockHash)
+			block, err := node.CreateBlock(node.lastBlockNum+1, time.Now().Unix(), transactions, node.GetBlockByNumber(node.lastBlockNum).BlockHash)
 			if err != nil {
 				t.Error(err)
 			}
@@ -140,6 +216,8 @@ func TestStartingBlockchain(t *testing.T) {
 			for _, peer := range node.peers {
 				peer.Send(context, message)
 			}
+
+			break
 		}
 	}
 
@@ -168,7 +246,7 @@ func TestStartingBlockchain(t *testing.T) {
 
 	peers[3].Broadcast(context, message)
 
-	time.Sleep(time.Second * 5)
+	time.Sleep(time.Second)
 	for _, peer := range peers {
 		peer.AmIValidatorNow()
 	}
@@ -195,7 +273,7 @@ func TestSendTransactionSuccess(t *testing.T) {
 		if numOfValidators > 0 {
 			genesis.Validators = append(genesis.Validators, key.Public())
 			numOfValidators--
-		} 
+		}
 
 		address, err := PubKeyToAddress(key.Public())
 		if err != nil {
@@ -220,7 +298,7 @@ func TestSendTransactionSuccess(t *testing.T) {
 			}
 		}
 	}
-	
+
 	tr := Transaction{
 		From:   peers[3].NodeAddress(),
 		To:     peers[4].NodeAddress(),

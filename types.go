@@ -125,7 +125,6 @@ func (cp connectedPeer) Send(ctx context.Context, m Message) {
 		case cp.Out <- m:
 			return
 		default:
-
 		}
 	}
 	//cp.Out <- m

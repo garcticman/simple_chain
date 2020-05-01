@@ -1,13 +1,13 @@
 package bc
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"log"
-	"sort"
 	"sync"
 	"time"
 )
@@ -25,12 +25,12 @@ func NewNode(key ed25519.PrivateKey, genesis Genesis) (*Node, error) {
 		address:         address,
 		genesis:         genesis,
 		blocks:          make([]Block, 0),
-		validators:      SortValidators(genesis.Validators),
+		validators:      convertValidators(genesis.Validators),
 		lastBlockNum:    0,
 		peers:           make(map[string]connectedPeer, 0),
 		state:           make(map[string]uint64),
 		transactionPool: make(map[string]Transaction),
-		tmpBlocks:       make(map[uint64]Block),
+		tmpBlocks:       make(map[uint64][]Message),
 	}
 
 	return node, err
@@ -43,7 +43,7 @@ type Node struct {
 	lastBlockNum uint64
 
 	//state
-	blocks []Block
+	blocks      []Block
 	blocksMutex sync.Mutex
 	//peer address - > peer info
 	peers map[string]connectedPeer
@@ -53,31 +53,19 @@ type Node struct {
 	validators []ed25519.PublicKey
 
 	//transaction hash - > transaction
-	transactionPool map[string]Transaction
+	transactionPool   map[string]Transaction
 	transactionsMutex sync.Mutex
 
 	//blockNum - > temporary block
-	tmpBlocks map[uint64]Block
+	tmpBlocks map[uint64][]Message
 }
 
 func (c *Node) NodeKey() crypto.PublicKey {
 	return c.key.Public()
 }
 
-func (c *Node) GetValidatorId() (id uint64) {
-	if id = uint64(sort.Search(len(c.validators), func(i int) bool {
-		return string(c.key.Public().(ed25519.PublicKey)) <= string(c.validators[i])
-	})); id == uint64(len(c.validators)) {
-		return uint64(len(c.validators))
-	}
-
-	return
-}
-
 func (c *Node) AmIValidatorNow() bool {
-	id := c.GetValidatorId()
-
-	return id == (c.lastBlockNum - 1) % uint64(len(c.validators))
+	return uint64(bytes.Compare(c.validators[(c.lastBlockNum)%uint64(len(c.validators))], c.NodeKey().(ed25519.PublicKey))) == 0
 }
 
 func (c *Node) Connection(address string, in chan Message, out chan Message) chan Message {
@@ -126,45 +114,40 @@ func (c *Node) peerLoop(ctx context.Context, peer connectedPeer) {
 			BlockNum: c.lastBlockNum,
 		},
 	})
+
+	logger := make(chan error)
+
 	for {
 		select {
 		case <-ctx.Done():
 			log.Println("return")
 			return
 		case msg := <-peer.In:
-			//log.Println("Test")
-			err := c.processMessage(peer.Address, msg, ctx)
-			if err != nil {
-				log.Println("Process peer error", err)
-				continue
-			}
+			c.processMessage(peer.Address, msg, ctx, logger)
 
-			//broadcast to connected peers
-			//c.Broadcast(ctx, msg)
+		//broadcast to connected peers
+		//c.Broadcast(ctx, msg)
+		case msg := <-logger:
+			if msg != nil {
+				log.Println("Process msg", msg)
+			}
 		}
 	}
 }
 
-func (c *Node) processMessage(address string, msg Message, ctx context.Context) error {
-	var err error
-
+func (c *Node) processMessage(address string, msg Message, ctx context.Context, logger chan error) {
 	switch m := msg.Data.(type) {
 	//example
 	case NodeInfoResp:
-		err = c.NodeInfoRespMessage(address, m, ctx)
+		go c.NodeInfoRespMessage(address, m, ctx)
 	case Transaction:
-		err = c.TransactionMessage(address, m)
+		go c.TransactionMessage(address, m, logger)
 	case Block:
-		err = c.BlockMessage(address, m, ctx)
+		go c.BlockMessage(address, m, logger, ctx)
 	case NeedBlocks:
-		err = c.NeedBlocks(address, m, ctx)
-	}
-
-	if err == nil {
-		c.Broadcast(ctx, msg)
+		go c.NeedBlocks(address, m, ctx)
 	}
 	//TODO send that block was declined with error
-	return err
 }
 
 func (c *Node) Broadcast(ctx context.Context, msg Message) {
@@ -175,21 +158,26 @@ func (c *Node) Broadcast(ctx context.Context, msg Message) {
 	}
 }
 
-func (c *Node) NeedBlocks(address string, message NeedBlocks, ctx context.Context) error {
+func (c *Node) NeedBlocks(address string, message NeedBlocks, ctx context.Context) {
 	fmt.Println(c.address, "connected to ", address, "to sync")
 
-	for i := uint64(message)+1; i <= c.lastBlockNum; i++ {
+	c.blocksMutex.Lock()
+	defer c.blocksMutex.Unlock()
+
+	for i := uint64(message) + 1; i <= c.lastBlockNum; i++ {
 		blockMessage := Message{
 			From: c.NodeAddress(),
 			Data: c.blocks[i],
 		}
 		c.peers[address].Send(ctx, blockMessage)
 	}
-
-	return nil
 }
 
-func (c *Node) NodeInfoRespMessage(address string, message NodeInfoResp, ctx context.Context) error {
+func (c *Node) NodeInfoRespMessage(address string, message NodeInfoResp, ctx context.Context) {
+
+	c.blocksMutex.Lock()
+	defer c.blocksMutex.Unlock()
+
 	if c.lastBlockNum < message.BlockNum {
 		helpMessage := Message{
 			From: c.NodeAddress(),
@@ -197,105 +185,116 @@ func (c *Node) NodeInfoRespMessage(address string, message NodeInfoResp, ctx con
 		}
 		c.peers[address].Send(ctx, helpMessage)
 	}
-	return nil
 }
 
-func (c *Node) TransactionMessage(address string, transaction Transaction) error {
+func (c *Node) TransactionMessage(address string, transaction Transaction, logger chan error) {
 	fmt.Println(address, "connected to ", c.address, " to offer transaction")
+
 	c.transactionsMutex.Lock()
 	defer c.transactionsMutex.Unlock()
 
 	hash, err := transaction.Hash()
 	if err != nil {
-		fmt.Println(address, "didn't send to ", c.address, "(hash error)")
-		return err
+		logger <- err
+		return
 	}
 	if _, ok := c.transactionPool[hash]; ok {
-		fmt.Println(address, "didn't send transaction to ", c.address, "(offer declined)")
-		return nil
+		logger <- errors.New("didn't send transaction to " + c.address + "(offer declined)")
+		return
 	}
 	if err := c.AddTransaction(transaction); err != nil {
-		fmt.Println(err)
-		return err
+		logger <- err
+		return
 	}
 
 	fmt.Println(address, "sent transaction to ", c.address)
-	return nil
 }
 
-func (c *Node) BlockMessage(address string, block Block, ctx context.Context) error {
+func (c *Node) BlockMessage(address string, block Block, logger chan error, ctx context.Context) {
 	fmt.Println(address, "connected to ", c.address, " to offer block")
+	c.BlockValidating(address, block, logger, ctx)
+
+	for _, message := range c.tmpBlocks[c.lastBlockNum + 1] {
+		go c.BlockMessage(message.From, message.Data.(Block), logger, ctx)
+	}
+
+	return
+}
+
+func (c *Node) BlockValidating(address string, block Block, logger chan error, ctx context.Context) {
 	c.blocksMutex.Lock()
 	defer c.blocksMutex.Unlock()
 
 	if block.BlockNum <= c.lastBlockNum {
-		fmt.Println(address, "didn't send block to ", c.address, "(offer declined), already exist")
-		return errors.New("block already exist")
+		logger <- BlockMessageError{address + "didn't send block to " + c.address + "(offer declined), already exist"}
+		return
 	}
-	if block.BlockNum > c.lastBlockNum + 1 {
-		c.tmpBlocks[block.BlockNum] = block
-		fmt.Println(address, "didn't send block to ", c.address, "(offer declined), not yet")
-		return nil
-	}
+	if block.BlockNum > c.lastBlockNum+1 {
+		c.tmpBlocks[block.BlockNum] = append(c.tmpBlocks[block.BlockNum], Message{
+			From: address,
+			Data: block,
+		})
 
+		logger <- OrderError{address: address, block: block}
+		return
+	}
 	for _, v := range block.Transactions {
 		if err := c.AddTransaction(v); err != nil {
-			fmt.Println(address, "didn't send block to ", c.address, "(offer declined)" + err.Error())
-			return err
+			logger <- ValidationError{address, block.BlockNum, err}
+			return
 		}
 	}
 
-	testBlock, err := c.ValidateBlock(c.lastBlockNum + 1, block.Timestamp, block.Transactions, c.GetBlockByNumber(c.lastBlockNum).BlockHash)
+	testBlock, err := c.BlockWithoutSign(c.lastBlockNum+1, block.Timestamp, block.Transactions, c.GetBlockByNumber(c.lastBlockNum).BlockHash)
 	if err != nil {
-
-		fmt.Println(address, "didn't send block to ", c.address, "(offer declined)" + err.Error())
-		return err
+		logger <- ValidationError{address, block.BlockNum, err}
+		return
 	}
-
 	if testBlock.BlockHash != block.BlockHash {
-		fmt.Println(address, "didn't send block to ", c.address, "(offer declined), not equal")
-		return err
+		logger <- ValidationError{address, block.BlockNum, errors.New("hashes not equal")}
+		return
 	}
-
-	signVerify, err := block.VerifyBlockSign(c.validators[(block.BlockNum - 1) % uint64(len(c.validators))])
+	signVerify, err := block.VerifyBlockSign(c.validators[(block.BlockNum-1)%uint64(len(c.validators))])
 	if err != nil {
-		return err
+		logger <- ValidationError{address, block.BlockNum, err}
+		return
 	}
-
 	if !signVerify {
-		fmt.Println(address, "didn't send block to ", c.address, "(offer declined), sign error")
-		return err
+		logger <- ValidationError{address, block.BlockNum, errors.New("signs not equal")}
+		return
 	}
-
 	if err := c.insertBlock(block); err != nil {
-		return err
+		logger <- ValidationError{address, block.BlockNum, err}
+		return
 	}
 
 	fmt.Println(address, "sent block to ", c.address)
+	go c.Broadcast(ctx, Message{address, block})
 
 	if c.AmIValidatorNow() {
 		transactions, err := c.PrepareTransactions()
 		if err != nil {
-			return err
+			logger <- CreationBlockError{err.Error()}
+			return
 		}
 
-		block, err := c.CreateBlock(c.lastBlockNum + 1, time.Now().Unix(), transactions, c.GetBlockByNumber(c.lastBlockNum).BlockHash)
+		block, err := c.CreateBlock(c.lastBlockNum+1, time.Now().Unix(), transactions, c.GetBlockByNumber(c.lastBlockNum).BlockHash)
 		if err != nil {
-			return err
+			logger <- CreationBlockError{err.Error()}
+			return
 		}
 
 		if err := c.insertBlock(block); err != nil {
-			return err
+			logger <- CreationBlockError{err.Error()}
+			return
 		}
 
 		message := Message{
 			From: c.NodeAddress(),
 			Data: block,
 		}
-		c.Broadcast(ctx, message)
+		go c.Broadcast(ctx, message)
 	}
-
-	return nil
 }
 
 func (c *Node) RemovePeer(peer Blockchain) error {
@@ -364,7 +363,7 @@ func (c *Node) SignTransaction(transaction Transaction) (Transaction, error) {
 }
 
 func (c Node) CreateBlock(blockNum uint64, timestamp int64, transactions []Transaction, prevBlockHash string) (Block, error) {
-	block, err := c.ValidateBlock(blockNum, timestamp, transactions, prevBlockHash)
+	block, err := c.BlockWithoutSign(blockNum, timestamp, transactions, prevBlockHash)
 	if err != nil {
 		return Block{}, err
 	}
@@ -376,7 +375,7 @@ func (c Node) CreateBlock(blockNum uint64, timestamp int64, transactions []Trans
 	return block, nil
 }
 
-func (c Node) ValidateBlock(blockNum uint64, timestamp int64, transactions []Transaction, prevBlockHash string) (Block, error) {
+func (c Node) BlockWithoutSign(blockNum uint64, timestamp int64, transactions []Transaction, prevBlockHash string) (Block, error) {
 	block := Block{
 		BlockNum:      blockNum,
 		Timestamp:     timestamp,
@@ -418,7 +417,7 @@ func (c Node) CountStateAfterBlock(transactions []Transaction) (map[string]uint6
 		state[i] = v
 	}
 
-	address, err := PubKeyToAddress(c.validators[(c.lastBlockNum) % uint64(len(c.validators))])
+	address, err := PubKeyToAddress(c.validators[(c.lastBlockNum)%uint64(len(c.validators))])
 	if err != nil {
 		return nil, err
 	}
@@ -429,7 +428,7 @@ func (c Node) CountStateAfterBlock(transactions []Transaction) (map[string]uint6
 		if _, ok := state[v.To]; !ok {
 			return nil, errors.New("user " + v.To + " not exist")
 		}
-		if state[v.From] < v.Amount + v.Fee {
+		if state[v.From] < v.Amount+v.Fee {
 			return nil, errors.New("user " + v.From + " has lack of balance")
 		}
 
@@ -454,7 +453,7 @@ func (c *Node) insertGenesis() {
 }
 
 func (c *Node) insertBlock(b Block) error {
-	address, err := PubKeyToAddress(c.validators[(c.lastBlockNum) % uint64(len(c.validators))])
+	address, err := PubKeyToAddress(c.validators[(c.lastBlockNum)%uint64(len(c.validators))])
 	if err != nil {
 		return err
 	}
@@ -483,14 +482,16 @@ func (c *Node) PrepareTransactions() ([]Transaction, error) {
 		if err != nil {
 			log.Println(err)
 		}
-		if balance < tr.Amount + tr.Fee {
+		if balance < tr.Amount+tr.Fee {
 			log.Println("user " + tr.From + " has insufficient balance")
 		}
 
 		transactions = append(transactions, tr)
 
 		i--
-		if i == 0 { return transactions, nil }
+		if i == 0 {
+			return transactions, nil
+		}
 	}
 
 	return transactions, nil
