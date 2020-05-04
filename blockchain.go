@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const MSGBusLen = 100
+const MSGBusLen = 10
 
 func NewNode(key ed25519.PrivateKey, genesis Genesis) (*Node, error) {
 	address, err := PubKeyToAddress(key.Public())
@@ -37,27 +37,34 @@ func NewNode(key ed25519.PrivateKey, genesis Genesis) (*Node, error) {
 }
 
 type Node struct {
-	key          ed25519.PrivateKey
-	address      string
-	genesis      Genesis
-	lastBlockNum uint64
+	key               ed25519.PrivateKey
+	address           string
+	genesis           Genesis
+	lastBlockNum      uint64
+	lastBLockNumMutex sync.RWMutex
 
 	//state
 	blocks      []Block
-	blocksMutex sync.Mutex
+	blocksMutex sync.RWMutex
 	//peer address - > peer info
-	peers map[string]connectedPeer
+	peers      map[string]connectedPeer
+	peersMutex sync.RWMutex
 	//hash(state) - хеш от упорядоченного слайса ключ-значение
 	//todo hash()
 	state      map[string]uint64
-	validators []ed25519.PublicKey
+	stateMutex sync.RWMutex
 
+	validators []ed25519.PublicKey
 	//transaction hash - > transaction
 	transactionPool   map[string]Transaction
-	transactionsMutex sync.Mutex
+	transactionsMutex sync.RWMutex
 
 	//blockNum - > temporary block
-	tmpBlocks map[uint64][]Message
+	tmpBlocks      map[uint64][]Message
+	tmpBlocksMutex sync.Mutex
+
+	blockMessageMutex       sync.Mutex
+	transactionMessageMutex sync.Mutex
 }
 
 func (c *Node) NodeKey() crypto.PublicKey {
@@ -65,7 +72,7 @@ func (c *Node) NodeKey() crypto.PublicKey {
 }
 
 func (c *Node) AmIValidatorNow() bool {
-	return uint64(bytes.Compare(c.validators[(c.lastBlockNum)%uint64(len(c.validators))], c.NodeKey().(ed25519.PublicKey))) == 0
+	return uint64(bytes.Compare(c.validators[(c.GetLastBlockNum())%uint64(len(c.validators))], c.NodeKey().(ed25519.PublicKey))) == 0
 }
 
 func (c *Node) Connection(address string, in chan Message, out chan Message) chan Message {
@@ -73,6 +80,7 @@ func (c *Node) Connection(address string, in chan Message, out chan Message) cha
 		out = make(chan Message, MSGBusLen)
 	}
 
+	c.peersMutex.Lock()
 	ctx, cancel := context.WithCancel(context.Background())
 	c.peers[address] = connectedPeer{
 		Address: address,
@@ -80,6 +88,7 @@ func (c *Node) Connection(address string, in chan Message, out chan Message) cha
 		In:      in,
 		cancel:  cancel,
 	}
+	c.peersMutex.Unlock()
 
 	go c.peerLoop(ctx, c.peers[address])
 	return c.peers[address].Out
@@ -131,6 +140,8 @@ func (c *Node) peerLoop(ctx context.Context, peer connectedPeer) {
 			if msg != nil {
 				log.Println("Process msg", msg)
 			}
+
+			c.HandleErrors(msg, ctx)
 		}
 	}
 }
@@ -147,59 +158,58 @@ func (c *Node) processMessage(address string, msg Message, ctx context.Context, 
 	case NeedBlocks:
 		go c.NeedBlocks(address, m, ctx)
 	}
-	//TODO send that block was declined with error
 }
 
 func (c *Node) Broadcast(ctx context.Context, msg Message) {
+	c.peersMutex.RLock()
 	for _, v := range c.peers {
 		if v.Address != c.address {
 			v.Send(ctx, msg)
 		}
 	}
+	c.peersMutex.RUnlock()
 }
 
 func (c *Node) NeedBlocks(address string, message NeedBlocks, ctx context.Context) {
+	c.peersMutex.RLock()
 	fmt.Println(c.address, "connected to ", address, "to sync")
 
-	c.blocksMutex.Lock()
-	defer c.blocksMutex.Unlock()
-
-	for i := uint64(message) + 1; i <= c.lastBlockNum; i++ {
+	for i := uint64(message) + 1; i <= c.GetLastBlockNum(); i++ {
 		blockMessage := Message{
 			From: c.NodeAddress(),
-			Data: c.blocks[i],
+			Data: c.GetBlockByNumber(i),
 		}
 		c.peers[address].Send(ctx, blockMessage)
 	}
+	c.peersMutex.RUnlock()
 }
 
 func (c *Node) NodeInfoRespMessage(address string, message NodeInfoResp, ctx context.Context) {
+	c.peersMutex.RLock()
 
-	c.blocksMutex.Lock()
-	defer c.blocksMutex.Unlock()
-
-	if c.lastBlockNum < message.BlockNum {
+	if c.GetLastBlockNum() < message.BlockNum {
 		helpMessage := Message{
 			From: c.NodeAddress(),
-			Data: NeedBlocks(c.lastBlockNum),
+			Data: NeedBlocks(c.GetLastBlockNum()),
 		}
 		c.peers[address].Send(ctx, helpMessage)
 	}
+	c.peersMutex.RUnlock()
 }
 
 func (c *Node) TransactionMessage(address string, transaction Transaction, logger chan error) {
-	fmt.Println(address, "connected to ", c.address, " to offer transaction")
+	c.transactionMessageMutex.Lock()
+	defer c.transactionMessageMutex.Unlock()
 
-	c.transactionsMutex.Lock()
-	defer c.transactionsMutex.Unlock()
+	fmt.Println(address, "connected to ", c.address, " to offer transaction")
 
 	hash, err := transaction.Hash()
 	if err != nil {
 		logger <- err
 		return
 	}
-	if _, ok := c.transactionPool[hash]; ok {
-		logger <- errors.New("didn't send transaction to " + c.address + "(offer declined)")
+	if _, err := c.GetTransaction(hash); err == nil {
+		logger <- errors.New("didn't send transaction to " + c.address + "already exist")
 		return
 	}
 	if err := c.AddTransaction(transaction); err != nil {
@@ -214,7 +224,7 @@ func (c *Node) BlockMessage(address string, block Block, logger chan error, ctx 
 	fmt.Println(address, "connected to ", c.address, " to offer block")
 	c.BlockValidating(address, block, logger, ctx)
 
-	for _, message := range c.tmpBlocks[c.lastBlockNum + 1] {
+	for _, message := range c.GetFromTmpBlocks(c.GetLastBlockNum() + 1) {
 		go c.BlockMessage(message.From, message.Data.(Block), logger, ctx)
 	}
 
@@ -222,18 +232,16 @@ func (c *Node) BlockMessage(address string, block Block, logger chan error, ctx 
 }
 
 func (c *Node) BlockValidating(address string, block Block, logger chan error, ctx context.Context) {
-	c.blocksMutex.Lock()
-	defer c.blocksMutex.Unlock()
+	c.blockMessageMutex.Lock()
+	defer c.blockMessageMutex.Unlock()
 
-	if block.BlockNum <= c.lastBlockNum {
+	lastBlocNum := c.GetLastBlockNum()
+	if block.BlockNum <= lastBlocNum {
 		logger <- BlockMessageError{address + "didn't send block to " + c.address + "(offer declined), already exist"}
 		return
 	}
-	if block.BlockNum > c.lastBlockNum+1 {
-		c.tmpBlocks[block.BlockNum] = append(c.tmpBlocks[block.BlockNum], Message{
-			From: address,
-			Data: block,
-		})
+	if block.BlockNum > lastBlocNum+1 {
+		c.SetTmpBlocks(block, address)
 
 		logger <- OrderError{address: address, block: block}
 		return
@@ -245,7 +253,7 @@ func (c *Node) BlockValidating(address string, block Block, logger chan error, c
 		}
 	}
 
-	testBlock, err := c.BlockWithoutSign(c.lastBlockNum+1, block.Timestamp, block.Transactions, c.GetBlockByNumber(c.lastBlockNum).BlockHash)
+	testBlock, err := c.BlockWithoutSign(lastBlocNum+1, block.Timestamp, block.Transactions, c.GetBlockByNumber(lastBlocNum).BlockHash)
 	if err != nil {
 		logger <- ValidationError{address, block.BlockNum, err}
 		return
@@ -278,7 +286,8 @@ func (c *Node) BlockValidating(address string, block Block, logger chan error, c
 			return
 		}
 
-		block, err := c.CreateBlock(c.lastBlockNum+1, time.Now().Unix(), transactions, c.GetBlockByNumber(c.lastBlockNum).BlockHash)
+		lastBlocNum = c.GetLastBlockNum()
+		block, err := c.CreateBlock(lastBlocNum+1, time.Now().Unix(), transactions, c.GetBlockByNumber(lastBlocNum).BlockHash)
 		if err != nil {
 			logger <- CreationBlockError{err.Error()}
 			return
@@ -297,21 +306,65 @@ func (c *Node) BlockValidating(address string, block Block, logger chan error, c
 	}
 }
 
+func (c *Node) GetFromTmpBlocks(numOfBlock uint64) (msgs []Message) {
+	c.tmpBlocksMutex.Lock()
+
+	msgs = c.tmpBlocks[numOfBlock]
+	delete(c.tmpBlocks, numOfBlock)
+
+	c.tmpBlocksMutex.Unlock()
+	return msgs
+}
+
+func (c *Node) SetTmpBlocks(block Block, address string) {
+	c.tmpBlocksMutex.Lock()
+
+	c.tmpBlocks[block.BlockNum] = append(c.tmpBlocks[block.BlockNum], Message{
+		From: address,
+		Data: block,
+	})
+
+	c.tmpBlocksMutex.Unlock()
+}
+
 func (c *Node) RemovePeer(peer Blockchain) error {
 	panic("implement me")
 	return nil
 }
 
 func (c *Node) GetBalance(account string) (uint64, error) {
+	c.stateMutex.RLock()
+
 	balance, ok := c.state[account]
 	if !ok {
+		c.stateMutex.RUnlock()
 		return 0, errors.New("unknown user")
 	}
 
+	c.stateMutex.RUnlock()
 	return balance, nil
 }
 
+func (c *Node) GetTransaction(hash string) (Transaction, error) {
+	c.transactionsMutex.Lock()
+	defer c.transactionsMutex.Unlock()
+
+	if tr, ok := c.transactionPool[hash]; ok {
+		return tr, nil
+	} else {
+		return Transaction{}, errors.New("unknown transaction")
+	}
+}
+
+func (c *Node) DeleteTransaction(hash string) {
+	c.transactionsMutex.Lock()
+	delete(c.transactionPool, hash)
+	c.transactionsMutex.Unlock()
+}
+
 func (c *Node) AddTransaction(transaction Transaction) error {
+	c.transactionsMutex.Lock()
+
 	tr := transaction
 	tr.Signature = []byte{}
 
@@ -323,6 +376,7 @@ func (c *Node) AddTransaction(transaction Transaction) error {
 		return err
 	}
 	if !ed25519.Verify(transaction.PubKey, b, transaction.Signature) {
+		c.transactionsMutex.Unlock()
 		return errors.New("wrong signature")
 	}
 
@@ -333,15 +387,16 @@ func (c *Node) AddTransaction(transaction Transaction) error {
 
 	c.transactionPool[hash] = transaction
 
+	c.transactionsMutex.Unlock()
 	return nil
 }
 
-func (c *Node) GetBlockByNumber(ID uint64) Block {
-	if ID >= uint64(len(c.blocks)) {
-		return Block{}
-	}
+func (c *Node) GetBlockByNumber(blockNum uint64) Block {
+	c.blocksMutex.RLock()
+	block := c.blocks[blockNum]
+	c.blocksMutex.RUnlock()
 
-	return c.blocks[ID]
+	return block
 }
 
 func (c *Node) NodeInfo() NodeInfoResp {
@@ -362,7 +417,7 @@ func (c *Node) SignTransaction(transaction Transaction) (Transaction, error) {
 	return transaction, nil
 }
 
-func (c Node) CreateBlock(blockNum uint64, timestamp int64, transactions []Transaction, prevBlockHash string) (Block, error) {
+func (c *Node) CreateBlock(blockNum uint64, timestamp int64, transactions []Transaction, prevBlockHash string) (Block, error) {
 	block, err := c.BlockWithoutSign(blockNum, timestamp, transactions, prevBlockHash)
 	if err != nil {
 		return Block{}, err
@@ -375,7 +430,7 @@ func (c Node) CreateBlock(blockNum uint64, timestamp int64, transactions []Trans
 	return block, nil
 }
 
-func (c Node) BlockWithoutSign(blockNum uint64, timestamp int64, transactions []Transaction, prevBlockHash string) (Block, error) {
+func (c *Node) BlockWithoutSign(blockNum uint64, timestamp int64, transactions []Transaction, prevBlockHash string) (Block, error) {
 	block := Block{
 		BlockNum:      blockNum,
 		Timestamp:     timestamp,
@@ -410,17 +465,14 @@ func (c Node) BlockWithoutSign(blockNum uint64, timestamp int64, transactions []
 	return block, nil
 }
 
-func (c Node) CountStateAfterBlock(transactions []Transaction) (map[string]uint64, error) {
-	state := make(map[string]uint64, len(c.state))
-
-	for i, v := range c.state {
-		state[i] = v
-	}
-
-	address, err := PubKeyToAddress(c.validators[(c.lastBlockNum)%uint64(len(c.validators))])
+func (c *Node) CountStateAfterBlock(transactions []Transaction) (map[string]uint64, error) {
+	address, err := PubKeyToAddress(c.validators[(c.GetLastBlockNum())%uint64(len(c.validators))])
 	if err != nil {
 		return nil, err
 	}
+
+	state := c.GetState()
+
 	for _, v := range transactions {
 		if _, ok := state[v.From]; !ok {
 			return nil, errors.New("user " + v.From + " not exist")
@@ -432,8 +484,8 @@ func (c Node) CountStateAfterBlock(transactions []Transaction) (map[string]uint6
 			return nil, errors.New("user " + v.From + " has lack of balance")
 		}
 
-		state[v.From] = c.state[v.From] - v.Amount - v.Fee
-		state[v.To] = c.state[v.To] + v.Amount
+		state[v.From] = state[v.From] - v.Amount - v.Fee
+		state[v.To] = state[v.To] + v.Amount
 		state[address] += v.Fee
 	}
 	state[address] += 1000
@@ -443,17 +495,22 @@ func (c Node) CountStateAfterBlock(transactions []Transaction) (map[string]uint6
 
 func (c *Node) insertGenesis() {
 	block := c.genesis.ToBlock()
+	c.stateMutex.Lock()
 
 	for _, v := range block.Transactions {
 		c.state[v.To] = c.state[v.To] + v.Amount
 		c.state[c.address] += v.Fee
 	}
 
-	c.blocks = append(c.blocks, block)
+	c.stateMutex.Unlock()
+	c.AddBlock(block)
 }
 
 func (c *Node) insertBlock(b Block) error {
-	address, err := PubKeyToAddress(c.validators[(c.lastBlockNum)%uint64(len(c.validators))])
+	c.stateMutex.Lock()
+	defer c.stateMutex.Unlock()
+
+	address, err := PubKeyToAddress(c.validators[(c.GetLastBlockNum())%uint64(len(c.validators))])
 	if err != nil {
 		return err
 	}
@@ -464,16 +521,18 @@ func (c *Node) insertBlock(b Block) error {
 		c.state[address] += v.Fee
 
 		hash, _ := v.Hash()
-		delete(c.transactionPool, hash)
+		c.DeleteTransaction(hash)
 	}
 	c.state[address] += 1000
 
-	c.lastBlockNum = b.BlockNum
-	c.blocks = append(c.blocks, b)
+	c.AddLastBlockNum()
+	c.AddBlock(b)
 	return nil
 }
 
 func (c *Node) PrepareTransactions() ([]Transaction, error) {
+	c.transactionsMutex.RLock()
+
 	var transactions []Transaction
 
 	i := 10
@@ -490,9 +549,61 @@ func (c *Node) PrepareTransactions() ([]Transaction, error) {
 
 		i--
 		if i == 0 {
+			c.transactionsMutex.RUnlock()
 			return transactions, nil
 		}
 	}
 
+	c.transactionsMutex.RUnlock()
 	return transactions, nil
+}
+
+func (c *Node) HandleErrors(err error, ctx context.Context) {
+	switch e := err.(type) {
+	case BlockMessageError:
+		return
+	case ValidationError:
+		//TODO send that block was declined with error
+	case OrderError:
+		msg := Message{
+			From: e.address,
+			Data: e.block,
+		}
+
+		go c.Broadcast(ctx, msg)
+	case CreationBlockError:
+		panic(err)
+	}
+}
+
+func (c *Node) GetLastBlockNum() uint64 {
+	c.lastBLockNumMutex.RLock()
+	lastBLockNum := c.lastBlockNum
+	c.lastBLockNumMutex.RUnlock()
+
+	return lastBLockNum
+}
+
+func (c *Node) AddLastBlockNum() {
+	c.lastBLockNumMutex.Lock()
+	c.lastBlockNum += 1
+	c.lastBLockNumMutex.Unlock()
+}
+
+func (c *Node) AddBlock(block Block) {
+	c.blocksMutex.Lock()
+	c.blocks = append(c.blocks, block)
+	c.blocksMutex.Unlock()
+}
+
+func (c *Node) GetState() map[string]uint64 {
+	c.stateMutex.Lock()
+	state := make(map[string]uint64, len(c.state))
+
+	for i, v := range c.state {
+		state[i] = v
+	}
+	c.stateMutex.Unlock()
+
+	return state
 }

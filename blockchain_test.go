@@ -98,7 +98,7 @@ func TestBlockMessage(t *testing.T) {
 	default:
 	}
 
-	peers[2].BlockMessage(peers[1].address, peers[1].blocks[2], logger, context.TODO())
+	peers[2].BlockMessage(peers[1].address, peers[1].GetBlockByNumber(2), logger, context.TODO())
 	select {
 	case <-logger:
 		t.Error(err)
@@ -109,7 +109,7 @@ func TestBlockMessage(t *testing.T) {
 		t.Fail()
 	}
 
-	if peers[2].state[peers[0].address] != 2000 && peers[2].state[peers[1].address] != 2000 && peers[2].state[peers[2].address] != 2000 {
+	if peers[2].GetState()[peers[0].address] != 2000 && peers[2].GetState()[peers[1].address] != 2000 && peers[2].GetState()[peers[2].address] != 2000 {
 		t.Fail()
 	}
 }
@@ -147,7 +147,7 @@ func TestSync(t *testing.T) {
 
 	for _, peer := range peers {
 		if peer.AmIValidatorNow() {
-			block, err := peer.CreateBlock(peer.lastBlockNum+1, time.Now().Unix(), nil, peer.blocks[0].BlockHash)
+			block, err := peer.CreateBlock(peer.GetLastBlockNum()+1, time.Now().Unix(), nil, peer.GetBlockByNumber(0).BlockHash)
 			if err != nil {
 				t.Error(err)
 			}
@@ -165,14 +165,15 @@ func TestSync(t *testing.T) {
 		}
 	}
 
-	time.Sleep(time.Second * 10)
+	time.Sleep(time.Second)
 
-	require.Equal(t, peers[1].blocks[1], peers[0].blocks[1])
-	require.Equal(t, peers[2].blocks[1], peers[0].blocks[1])
+	require.Equal(t, peers[1].GetBlockByNumber(1), peers[0].GetBlockByNumber(1))
+	require.Equal(t, peers[2].GetBlockByNumber(1), peers[0].GetBlockByNumber(1))
 }
 
 func TestStartingBlockchain(t *testing.T) {
 	var err error
+	initialBalance := uint64(100000)
 
 	peers := make([]*Node, 5)
 	for i := 0; i < 5; i++ {
@@ -247,86 +248,13 @@ func TestStartingBlockchain(t *testing.T) {
 	peers[3].Broadcast(context, message)
 
 	time.Sleep(time.Second)
-	for _, peer := range peers {
-		peer.AmIValidatorNow()
-	}
-}
 
-func TestSendTransactionSuccess(t *testing.T) {
-	numOfPeers := 5
-	numOfValidators := 3
-	initialBalance := uint64(100000)
-	peers := make([]Blockchain, numOfPeers)
-
-	genesis := Genesis{
-		make(map[string]uint64),
-		make([]crypto.PublicKey, 0, numOfValidators),
-	}
-
-	keys := make([]ed25519.PrivateKey, numOfPeers)
-	for i := range keys {
-		_, key, err := ed25519.GenerateKey(nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		keys[i] = key
-		if numOfValidators > 0 {
-			genesis.Validators = append(genesis.Validators, key.Public())
-			numOfValidators--
-		}
-
-		address, err := PubKeyToAddress(key.Public())
-		if err != nil {
-			t.Error(err)
-		}
-		genesis.Alloc[address] = initialBalance
-	}
-
-	var err error
-	for i := 0; i < numOfPeers; i++ {
-		peers[i], err = NewNode(keys[i], genesis)
-		if err != nil {
-			t.Error(err)
-		}
-	}
-
-	for i := 0; i < len(peers); i++ {
-		for j := i + 1; j < len(peers); j++ {
-			err = peers[i].AddPeer(peers[j])
-			if err != nil {
-				t.Error(err)
-			}
-		}
-	}
-
-	tr := Transaction{
-		From:   peers[3].NodeAddress(),
-		To:     peers[4].NodeAddress(),
-		Amount: 100,
-		Fee:    10,
-		PubKey: keys[3].Public().(ed25519.PublicKey),
-	}
-
-	tr, err = peers[3].SignTransaction(tr)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	err = peers[0].AddTransaction(tr)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	//wait transaction processing
-	time.Sleep(time.Second * 5)
-
-	//check "from" balance
 	balance, err := peers[0].GetBalance(peers[3].NodeAddress())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if balance != initialBalance-100-10 {
+	if (balance+110)%1000 != 0 {
 		t.Fatal("Incorrect from balance")
 	}
 
@@ -336,19 +264,34 @@ func TestSendTransactionSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if balance != initialBalance+100 {
+	if (balance-100)%1000 != 0 {
 		t.Fatal("Incorrect to balance")
 	}
 
 	//check validators balance
-	for i := 0; i < 3; i++ {
-		balance, err = peers[0].GetBalance(peers[i].NodeAddress())
-		if err != nil {
-			t.Error(err)
-		}
+	balance, err = peers[0].GetBalance(peers[1].NodeAddress())
+	if err != nil {
+		t.Error(err)
+	}
+	if balance < initialBalance {
+		t.Error("Incorrect validator balance")
+	}
 
-		if balance > initialBalance {
-			t.Error("Incorrect validator balance")
-		}
+	//check validators balance
+	balance, err = peers[0].GetBalance(peers[2].NodeAddress())
+	if err != nil {
+		t.Error(err)
+	}
+	if balance < initialBalance {
+		t.Error("Incorrect validator balance")
+	}
+
+	//check validators balance
+	balance, err = peers[0].GetBalance(peers[4].NodeAddress())
+	if err != nil {
+		t.Error(err)
+	}
+	if balance < initialBalance {
+		t.Error("Incorrect validator balance")
 	}
 }
