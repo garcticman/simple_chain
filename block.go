@@ -11,6 +11,16 @@ import (
 	"io/ioutil"
 )
 
+type Block struct {
+	BlockNum      uint64
+	Timestamp     int64
+	Transactions  []Transaction
+	BlockHash     string `json:"-"`
+	PrevBlockHash string
+	StateHash     string
+	Signature     []byte `json:"-"`
+}
+
 func LoadGenesis() (genesis Genesis, err error) {
 	tempGenesis := struct {
 		//Account -> funds
@@ -49,7 +59,7 @@ func LoadGenesis() (genesis Genesis, err error) {
 	//to have ed25519.PublicKey in crypto.PublicKey interface
 	if err == nil {
 		genesis = Genesis{
-			Alloc: tempGenesis.Alloc,
+			Alloc:      tempGenesis.Alloc,
 			Validators: make([]crypto.PublicKey, len(tempGenesis.Validators)),
 		}
 

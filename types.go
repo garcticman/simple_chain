@@ -1,53 +1,12 @@
 package bc
 
 import (
-	"bytes"
 	"context"
 	"crypto"
-	"crypto/ed25519"
-	"encoding/gob"
 	"fmt"
 	"sort"
 	"time"
 )
-
-type Block struct {
-	BlockNum      uint64
-	Timestamp     int64
-	Transactions  []Transaction
-	BlockHash     string `json:"-"`
-	PrevBlockHash string
-	StateHash     string
-	Signature     []byte `json:"-"`
-}
-
-type Transaction struct {
-	From   string
-	To     string
-	Amount uint64
-	Fee    uint64
-	PubKey ed25519.PublicKey
-
-	Signature []byte `json:"-"`
-}
-
-func (t Transaction) Hash() (string, error) {
-	b, err := Bytes(t)
-	if err != nil {
-		return "", err
-	}
-	return Hash(b)
-}
-
-func (t Transaction) Bytes() ([]byte, error) {
-	b := bytes.NewBuffer(nil)
-	err := gob.NewEncoder(b).Encode(t)
-	if err != nil {
-		return nil, err
-	}
-
-	return b.Bytes(), nil
-}
 
 // first block with blockchain settings
 type Genesis struct {

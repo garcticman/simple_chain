@@ -19,7 +19,7 @@ type PublicAPI interface {
 	GetBalance(account string) (uint64, error)
 	//add to transaction pool
 	AddTransaction(transaction Transaction) error
-	SignTransaction(transaction Transaction) (Transaction, error)
+	//SignTransaction(transaction Transaction) (Transaction, error)
 
 	//sync
 	GetBlockByNumber(ID uint64) Block

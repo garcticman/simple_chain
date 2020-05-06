@@ -12,7 +12,10 @@ import (
 	"time"
 )
 
-const MSGBusLen = 10
+const (
+	MSGBusLen = 10
+	MinFee    = uint64(1)
+)
 
 func NewNode(key ed25519.PrivateKey, genesis Genesis) (*Node, error) {
 	address, err := PubKeyToAddress(key.Public())
@@ -136,12 +139,12 @@ func (c *Node) peerLoop(ctx context.Context, peer connectedPeer) {
 
 		//broadcast to connected peers
 		//c.Broadcast(ctx, msg)
-		case msg := <-logger:
-			if msg != nil {
-				log.Println("Process msg", msg)
+		case err := <-logger:
+			if err != nil {
+				log.Println("Process msg", err)
 			}
 
-			c.HandleErrors(msg, ctx)
+			c.HandleErrors(err, ctx)
 		}
 	}
 }
@@ -364,6 +367,11 @@ func (c *Node) DeleteTransaction(hash string) {
 
 func (c *Node) AddTransaction(transaction Transaction) error {
 	c.transactionsMutex.Lock()
+	defer c.transactionsMutex.Unlock()
+
+	if transaction.Fee < MinFee {
+		return errors.New("fee error")
+	}
 
 	tr := transaction
 	tr.Signature = []byte{}
@@ -373,7 +381,7 @@ func (c *Node) AddTransaction(transaction Transaction) error {
 		return err
 	}
 	if address, err := PubKeyToAddress(transaction.PubKey); address != transaction.From || err != nil {
-		return err
+		return errors.New("wrong address")
 	}
 	if !ed25519.Verify(transaction.PubKey, b, transaction.Signature) {
 		c.transactionsMutex.Unlock()
@@ -387,7 +395,6 @@ func (c *Node) AddTransaction(transaction Transaction) error {
 
 	c.transactionPool[hash] = transaction
 
-	c.transactionsMutex.Unlock()
 	return nil
 }
 
@@ -405,16 +412,6 @@ func (c *Node) NodeInfo() NodeInfoResp {
 
 func (c *Node) NodeAddress() string {
 	return c.address
-}
-
-func (c *Node) SignTransaction(transaction Transaction) (Transaction, error) {
-	b, err := transaction.Bytes()
-	if err != nil {
-		return Transaction{}, err
-	}
-
-	transaction.Signature = ed25519.Sign(c.key, b)
-	return transaction, nil
 }
 
 func (c *Node) CreateBlock(blockNum uint64, timestamp int64, transactions []Transaction, prevBlockHash string) (Block, error) {
@@ -597,13 +594,13 @@ func (c *Node) AddBlock(block Block) {
 }
 
 func (c *Node) GetState() map[string]uint64 {
-	c.stateMutex.Lock()
+	c.stateMutex.RLock()
 	state := make(map[string]uint64, len(c.state))
 
 	for i, v := range c.state {
 		state[i] = v
 	}
-	c.stateMutex.Unlock()
+	c.stateMutex.RUnlock()
 
 	return state
 }

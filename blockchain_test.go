@@ -52,6 +52,53 @@ func InitForTest(numOfPeers, numOfValidators int) ([]*Node, error) {
 	return peers, nil
 }
 
+func TestAddTransaction(t *testing.T) {
+	peer := Node{transactionPool: map[string]Transaction{}}
+
+	err := peer.AddTransaction(Transaction{
+		From:      "",
+		To:        "",
+		Amount:    0,
+		Fee:       10,
+		PubKey:    nil,
+		Signature: nil,
+	})
+	if err == nil {
+		t.Fail()
+	}
+
+	_, key, _ := ed25519.GenerateKey(nil)
+	address, _ := PubKeyToAddress(key.Public())
+
+	err = peer.AddTransaction(Transaction{
+		From:      address,
+		To:        "ABC",
+		Amount:    0,
+		Fee:       0,
+		PubKey:    nil,
+		Signature: nil,
+	})
+	if err == nil {
+		t.Fail()
+	}
+
+	tr := Transaction{
+		From:      address,
+		To:        "ABC",
+		Amount:    0,
+		Fee:       1,
+		PubKey:    key.Public().(ed25519.PublicKey),
+		Signature: nil,
+	}
+
+	tr.SignTransaction(key)
+
+	err = peer.AddTransaction(tr)
+	if err != nil {
+		t.Error(err)
+	}
+}
+
 func TestBlockMessage(t *testing.T) {
 	peers, err := InitForTest(3, 3)
 	if err != nil {
@@ -173,7 +220,7 @@ func TestSync(t *testing.T) {
 
 func TestStartingBlockchain(t *testing.T) {
 	var err error
-	initialBalance := uint64(100000)
+	initialBalance := uint64(10000)
 
 	peers := make([]*Node, 5)
 	for i := 0; i < 5; i++ {
@@ -193,7 +240,6 @@ func TestStartingBlockchain(t *testing.T) {
 	}
 
 	for _, node := range peers {
-
 		if node.AmIValidatorNow() {
 			transactions, err := node.PrepareTransactions()
 			if err != nil {
@@ -230,7 +276,7 @@ func TestStartingBlockchain(t *testing.T) {
 		PubKey: peers[3].NodeKey().(ed25519.PublicKey),
 	}
 
-	tr, err = peers[3].SignTransaction(tr)
+	err = tr.SignTransaction(peers[3].key)
 	if err != nil {
 		t.Fatal(err)
 	}
