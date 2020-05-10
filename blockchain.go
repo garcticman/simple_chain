@@ -123,7 +123,8 @@ func (c *Node) peerLoop(ctx context.Context, peer connectedPeer) {
 		From: c.NodeAddress(),
 		Data: NodeInfoResp{
 			NodeName: c.address,
-			BlockNum: c.lastBlockNum,
+			//data race
+			BlockNum: c.GetLastBlockNum(),
 		},
 	})
 
@@ -137,6 +138,7 @@ func (c *Node) peerLoop(ctx context.Context, peer connectedPeer) {
 		case msg := <-peer.In:
 			c.processMessage(peer.Address, msg, ctx, logger)
 
+		//	 Этот коммент нужен?
 		//broadcast to connected peers
 		//c.Broadcast(ctx, msg)
 		case err := <-logger:
@@ -173,8 +175,18 @@ func (c *Node) Broadcast(ctx context.Context, msg Message) {
 	c.peersMutex.RUnlock()
 }
 
-func (c *Node) NeedBlocks(address string, message NeedBlocks, ctx context.Context) {
+func (c *Node) getPeer(address string) (connectedPeer,bool) {
 	c.peersMutex.RLock()
+	defer c.peersMutex.RUnlock()
+	peer,ok:=c.peers[address]
+	return peer, ok
+
+}
+
+func (c *Node) NeedBlocks(address string, message NeedBlocks, ctx context.Context) {
+	//тут нужна проверка
+	peer,_:=c.getPeer(address)
+
 	fmt.Println(c.address, "connected to ", address, "to sync")
 
 	for i := uint64(message) + 1; i <= c.GetLastBlockNum(); i++ {
@@ -182,22 +194,20 @@ func (c *Node) NeedBlocks(address string, message NeedBlocks, ctx context.Contex
 			From: c.NodeAddress(),
 			Data: c.GetBlockByNumber(i),
 		}
-		c.peers[address].Send(ctx, blockMessage)
+		peer.Send(ctx, blockMessage)
 	}
-	c.peersMutex.RUnlock()
 }
 
 func (c *Node) NodeInfoRespMessage(address string, message NodeInfoResp, ctx context.Context) {
-	c.peersMutex.RLock()
+	peer,_:=c.getPeer(address)
 
 	if c.GetLastBlockNum() < message.BlockNum {
 		helpMessage := Message{
 			From: c.NodeAddress(),
 			Data: NeedBlocks(c.GetLastBlockNum()),
 		}
-		c.peers[address].Send(ctx, helpMessage)
+		peer.Send(ctx, helpMessage)
 	}
-	c.peersMutex.RUnlock()
 }
 
 func (c *Node) TransactionMessage(address string, transaction Transaction, logger chan error) {
@@ -227,7 +237,7 @@ func (c *Node) BlockMessage(address string, block Block, logger chan error, ctx 
 	fmt.Println(address, "connected to ", c.address, " to offer block")
 	c.BlockValidating(address, block, logger, ctx)
 
-	for _, message := range c.GetFromTmpBlocks(c.GetLastBlockNum() + 1) {
+	for _, message := range c.GetAndRemoveFromTmpBlocks(c.GetLastBlockNum() + 1) {
 		go c.BlockMessage(message.From, message.Data.(Block), logger, ctx)
 	}
 
@@ -243,6 +253,7 @@ func (c *Node) BlockValidating(address string, block Block, logger chan error, c
 		logger <- BlockMessageError{address + "didn't send block to " + c.address + "(offer declined), already exist"}
 		return
 	}
+	//block
 	if block.BlockNum > lastBlocNum+1 {
 		c.SetTmpBlocks(block, address)
 
@@ -309,7 +320,7 @@ func (c *Node) BlockValidating(address string, block Block, logger chan error, c
 	}
 }
 
-func (c *Node) GetFromTmpBlocks(numOfBlock uint64) (msgs []Message) {
+func (c *Node) GetAndRemoveFromTmpBlocks(numOfBlock uint64) (msgs []Message) {
 	c.tmpBlocksMutex.Lock()
 
 	msgs = c.tmpBlocks[numOfBlock]
@@ -349,14 +360,13 @@ func (c *Node) GetBalance(account string) (uint64, error) {
 }
 
 func (c *Node) GetTransaction(hash string) (Transaction, error) {
-	c.transactionsMutex.Lock()
-	defer c.transactionsMutex.Unlock()
+	c.transactionsMutex.RLock()
+	defer c.transactionsMutex.RUnlock()
 
 	if tr, ok := c.transactionPool[hash]; ok {
 		return tr, nil
-	} else {
-		return Transaction{}, errors.New("unknown transaction")
 	}
+	return Transaction{}, errors.New("unknown transaction")
 }
 
 func (c *Node) DeleteTransaction(hash string) {
@@ -366,26 +376,10 @@ func (c *Node) DeleteTransaction(hash string) {
 }
 
 func (c *Node) AddTransaction(transaction Transaction) error {
-	c.transactionsMutex.Lock()
-	defer c.transactionsMutex.Unlock()
-
-	if transaction.Fee < MinFee {
-		return errors.New("fee error")
-	}
-
-	tr := transaction
-	tr.Signature = []byte{}
-
-	b, err := tr.Bytes()
+	//По хорошему - лучше разделить проверки транзации от добавления
+	err:=c.verifyTransaction(transaction)
 	if err != nil {
 		return err
-	}
-	if address, err := PubKeyToAddress(transaction.PubKey); address != transaction.From || err != nil {
-		return errors.New("wrong address")
-	}
-	if !ed25519.Verify(transaction.PubKey, b, transaction.Signature) {
-		c.transactionsMutex.Unlock()
-		return errors.New("wrong signature")
 	}
 
 	hash, err := transaction.Hash()
@@ -393,8 +387,31 @@ func (c *Node) AddTransaction(transaction Transaction) error {
 		return err
 	}
 
+	c.transactionsMutex.Lock()
+	defer c.transactionsMutex.Unlock()
 	c.transactionPool[hash] = transaction
 
+	return nil
+}
+
+func (c *Node) verifyTransaction(transaction Transaction) error {
+	if transaction.Fee < MinFee {
+		return errors.New("fee error")
+	}
+
+	sign:=transaction.Signature
+	transaction.Signature = []byte{}
+
+	b, err := transaction.Bytes()
+	if err != nil {
+		return err
+	}
+	if address, err := PubKeyToAddress(transaction.PubKey); address != transaction.From || err != nil {
+		return errors.New("wrong address")
+	}
+	if !ed25519.Verify(transaction.PubKey, b, sign) {
+		return errors.New("wrong signature")
+	}
 	return nil
 }
 
@@ -512,6 +529,7 @@ func (c *Node) insertBlock(b Block) error {
 		return err
 	}
 
+	// а может тут не хватить денег у From?
 	for _, v := range b.Transactions {
 		c.state[v.From] = c.state[v.From] - v.Amount - v.Fee
 		c.state[v.To] = c.state[v.To] + v.Amount
@@ -522,6 +540,8 @@ func (c *Node) insertBlock(b Block) error {
 	}
 	c.state[address] += 1000
 
+
+	// а почему не c.SetLastBlockNum(b.BlockNum)
 	c.AddLastBlockNum()
 	c.AddBlock(b)
 	return nil
@@ -532,6 +552,7 @@ func (c *Node) PrepareTransactions() ([]Transaction, error) {
 
 	var transactions []Transaction
 
+	//лучше в константы
 	i := 10
 	for _, tr := range c.transactionPool {
 		balance, err := c.GetBalance(tr.From)
@@ -546,8 +567,10 @@ func (c *Node) PrepareTransactions() ([]Transaction, error) {
 
 		i--
 		if i == 0 {
-			c.transactionsMutex.RUnlock()
-			return transactions, nil
+			break
+			//???
+			//c.transactionsMutex.RUnlock()
+			//return transactions, nil
 		}
 	}
 
@@ -574,6 +597,7 @@ func (c *Node) HandleErrors(err error, ctx context.Context) {
 }
 
 func (c *Node) GetLastBlockNum() uint64 {
+	//здесь было бы проще использовать atomic
 	c.lastBLockNumMutex.RLock()
 	lastBLockNum := c.lastBlockNum
 	c.lastBLockNumMutex.RUnlock()
@@ -593,6 +617,8 @@ func (c *Node) AddBlock(block Block) {
 	c.blocksMutex.Unlock()
 }
 
+
+// можно копировать не весь стейт а только тот, который трогается блоком
 func (c *Node) GetState() map[string]uint64 {
 	c.stateMutex.RLock()
 	state := make(map[string]uint64, len(c.state))

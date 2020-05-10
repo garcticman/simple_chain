@@ -13,7 +13,7 @@ import (
 )
 
 func InitForTest(numOfPeers, numOfValidators int) ([]*Node, error) {
-
+	numOfValidatorsCopy:=numOfValidators
 	genesis := Genesis{
 		make(map[string]uint64),
 		make([]crypto.PublicKey, 0, numOfPeers),
@@ -27,9 +27,9 @@ func InitForTest(numOfPeers, numOfValidators int) ([]*Node, error) {
 			return nil, err
 		}
 		keys[i] = key
-		if numOfValidators > 0 {
+		if numOfValidatorsCopy > 0 {
 			genesis.Validators = append(genesis.Validators, key.Public())
-			numOfValidators--
+			numOfValidatorsCopy--
 		}
 
 		address, err := PubKeyToAddress(key.Public())
@@ -40,7 +40,8 @@ func InitForTest(numOfPeers, numOfValidators int) ([]*Node, error) {
 	}
 
 	var err error
-	for i := 0; i < 3; i++ {
+	//panic
+	for i := 0; i < numOfValidators; i++ {
 		peers[i], err = NewNode(keys[i], genesis)
 		if err != nil {
 			return nil, err
@@ -96,6 +97,49 @@ func TestAddTransaction(t *testing.T) {
 	err = peer.AddTransaction(tr)
 	if err != nil {
 		t.Error(err)
+	}
+}
+func TestAddTransaction2(t *testing.T) {
+	peers,err:= InitForTest(2,2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = peers[0].AddPeer(peers[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tr := Transaction{
+		From:      peers[0].address,
+		To:        peers[1].address,
+		Amount:    10,
+		Fee:       1,
+		PubKey:    peers[0].key.Public().(ed25519.PublicKey),
+		Signature: nil,
+	}
+
+	err = tr.SignTransaction(peers[0].key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hash,err:=tr.Hash()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+
+	err = peers[0].AddTransaction(tr)
+	if err != nil {
+		t.Error(err)
+	}
+	time.Sleep(time.Second)
+	tr2,err:=peers[1].GetTransaction(hash)
+	if err!=nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(tr, tr2) {
+		t.Fatal(tr, tr2)
 	}
 }
 
