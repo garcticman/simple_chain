@@ -4,6 +4,7 @@ import (
 	"crypto"
 	"crypto/ed25519"
 	"fmt"
+	"os"
 	"testing"
 )
 
@@ -18,6 +19,8 @@ func TestCreateNewGenesis(t *testing.T) {
 	}
 
 	keys := make([]ed25519.PrivateKey, numOfPeers)
+	tmp:=os.TempDir()
+	defer os.Remove(tmp)
 	for i := range keys {
 		_, key, err := ed25519.GenerateKey(nil)
 		if err != nil {
@@ -35,12 +38,12 @@ func TestCreateNewGenesis(t *testing.T) {
 		}
 		genesis.Alloc[address] = initialBalance
 
-		if err := SaveToJSON(key, fmt.Sprintf("Keys/peer_%d.json", i)); err != nil {
+		if err := SaveToJSON(key, fmt.Sprintf(tmp+"peer_%d.json", i)); err != nil {
 			t.Error(err)
 		}
 	}
 
-	if err := SaveToJSON(genesis, "Genesis.json"); err != nil {
+	if err := SaveToJSON(genesis, tmp+"Genesis.json"); err != nil {
 		t.Error(err)
 	}
 }

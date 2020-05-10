@@ -30,33 +30,8 @@ func LoadGenesis() (genesis Genesis, err error) {
 	}{}
 
 	err = ReadFromJSON("Genesis.json", &tempGenesis)
-	if err != nil {
-		client := github.NewClient(nil)
-		context := context.Background()
-
-		var reader io.ReadCloser
-		reader, err = client.Repositories.DownloadContents(context, "garcticman", "simple_chain", "Genesis.json", nil)
-		if err != nil {
-			return
-		}
-
-		var file []byte
-		file, err = ioutil.ReadAll(reader)
-		if err != nil {
-			return
-		}
-
-		if err := json.Unmarshal(file, &tempGenesis); err != nil {
-			return Genesis{}, err
-		}
-
-		err = SaveToJSON(tempGenesis, "Genesis.json")
-		if err != nil {
-			return
-		}
-	}
-
-	//to have ed25519.PublicKey in crypto.PublicKey interface
+	//Упрощаем условие тут
+	//Меньше if блоков - проще читать
 	if err == nil {
 		genesis = Genesis{
 			Alloc:      tempGenesis.Alloc,
@@ -66,7 +41,35 @@ func LoadGenesis() (genesis Genesis, err error) {
 		for i, v := range tempGenesis.Validators {
 			genesis.Validators[i] = v
 		}
+		return genesis, nil
 	}
+
+
+	//download new genesis
+	client := github.NewClient(nil)
+	var reader io.ReadCloser
+	reader, err = client.Repositories.DownloadContents(context.Background(), "garcticman", "simple_chain", "Genesis.json", nil)
+	if err != nil {
+		return
+	}
+
+	var file []byte
+	file, err = ioutil.ReadAll(reader)
+	if err != nil {
+		return
+	}
+
+	if err := json.Unmarshal(file, &tempGenesis); err != nil {
+		return Genesis{}, err
+	}
+
+	err = SaveToJSON(tempGenesis, "Genesis.json")
+	if err != nil {
+		return
+	}
+
+
+	//to have ed25519.PublicKey in crypto.PublicKey interface
 	return
 }
 
