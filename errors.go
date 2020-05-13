@@ -8,8 +8,9 @@ type ValidationError struct {
 	error error
 }
 
+//todo прямо отлично с ошибками! прочитал про ошибки - это значения?
 func (ve ValidationError) Error() string {
-	return fmt.Sprintf("%s has sent incorrect block %d with next error:\n	%s", ve.address, ve.numOfBlock, ve.error)
+	return fmt.Sprintf("%s has sent incorrect block %d with next error:\n\t%s", ve.address, ve.numOfBlock, ve.error)
 }
 
 type BlockMessageError struct {

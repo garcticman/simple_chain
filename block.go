@@ -1,14 +1,9 @@
 package bc
 
 import (
-	"context"
 	"crypto"
 	"crypto/ed25519"
-	"encoding/json"
 	"errors"
-	"github.com/google/go-github/github"
-	"io"
-	"io/ioutil"
 )
 
 type Block struct {
@@ -31,29 +26,31 @@ func LoadGenesis() (genesis Genesis, err error) {
 
 	err = ReadFromJSON("Genesis.json", &tempGenesis)
 	if err != nil {
-		client := github.NewClient(nil)
-		context := context.Background()
-
-		var reader io.ReadCloser
-		reader, err = client.Repositories.DownloadContents(context, "garcticman", "simple_chain", "Genesis.json", nil)
-		if err != nil {
-			return
-		}
-
-		var file []byte
-		file, err = ioutil.ReadAll(reader)
-		if err != nil {
-			return
-		}
-
-		if err := json.Unmarshal(file, &tempGenesis); err != nil {
-			return Genesis{}, err
-		}
-
-		err = SaveToJSON(tempGenesis, "Genesis.json")
-		if err != nil {
-			return
-		}
+		// todo: не уверен, что это нужно и полезно.
+		return
+		// client := github.NewClient(nil)
+		// context := context.Background()
+		//
+		// var reader io.ReadCloser
+		// reader, err = client.Repositories.DownloadContents(context, "garcticman", "simple_chain", "Genesis.json", nil)
+		// if err != nil {
+		// 	return
+		// }
+		//
+		// var file []byte
+		// file, err = ioutil.ReadAll(reader)
+		// if err != nil {
+		// 	return
+		// }
+		//
+		// if err := json.Unmarshal(file, &tempGenesis); err != nil {
+		// 	return Genesis{}, err
+		// }
+		//
+		// err = SaveToJSON(tempGenesis, "Genesis.json")
+		// if err != nil {
+		// 	return
+		// }
 	}
 
 	//to have ed25519.PublicKey in crypto.PublicKey interface
