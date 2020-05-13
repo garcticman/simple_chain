@@ -152,7 +152,7 @@ func TestSync(t *testing.T) {
 		if peer.AmIValidatorNow() {
 			address, err := peer.GetValidatorAddress()
 
-			err = peer.CreateBlock(time.Now().Unix(), address, context.TODO())
+			err = peer.CreateBlock(context.TODO(), time.Now().Unix(), address)
 			if err != nil {
 				t.Error(err)
 			}
@@ -198,7 +198,7 @@ func TestStartingBlockchain(t *testing.T) {
 
 	for _, node := range peers {
 		if node.AmIValidatorNow() {
-			err := node.CreateBlock(time.Now().Unix(), node.address, context.TODO())
+			err := node.CreateBlock(context.TODO(), time.Now().Unix(), node.address)
 			if err != nil {
 				t.Error(err)
 			}

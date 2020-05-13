@@ -12,9 +12,10 @@ const (
 )
 
 type Transaction interface {
-	SignTransaction(key ed25519.PrivateKey) error
+	//todo не все методы в интерфейсе нужны. если будут в будущем использоваться, тогда и добавишь. интерфейсы стоит держать настолько небольшыми, насколько это возможно.
+	//SignTransaction(key ed25519.PrivateKey) error
+	//Bytes() ([]byte, error)
 	Hash() (string, error)
-	Bytes() ([]byte, error)
 	Verify() error
 	Execute(string, *State) error
 	GetSenderAddress() string

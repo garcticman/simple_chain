@@ -85,13 +85,12 @@ func (c *Node) AmIValidatorNow() bool {
 
 func (c *Node) GetValidatorPubKey(index uint64) (ed25519.PublicKey, error) {
 	c.validatorsMutex.Lock()
+	defer c.validatorsMutex.Unlock()
 	if index >= uint64(len(c.validators)) {
-		c.validatorsMutex.Unlock()
 		return nil, errors.New("validator not exist")
 	}
 
 	pubKey := c.validators[index]
-	c.validatorsMutex.Unlock()
 
 	return pubKey, nil
 }
@@ -161,28 +160,28 @@ func (c *Node) peerLoop(ctx context.Context, peer connectedPeer) {
 			log.Println("return")
 			return
 		case msg := <-peer.In:
-			c.processMessage(peer.Address, msg, ctx, logger)
+			c.processMessage(ctx, peer.Address, msg, logger)
 		case err := <-logger:
 			if err != nil {
 				log.Println("Process msg", err)
 			}
 
-			c.HandleErrors(err, ctx)
+			c.HandleErrors(ctx, err)
 		}
 	}
 }
 
-func (c *Node) processMessage(address string, msg Message, ctx context.Context, logger chan error) {
+func (c *Node) processMessage(ctx context.Context, address string, msg Message, logger chan error) {
 	switch m := msg.Data.(type) {
 	//example
 	case NodeInfoResp:
-		go c.NodeInfoRespMessage(address, m, logger, ctx)
+		go c.NodeInfoRespMessage(ctx, address, m, logger)
 	case Transaction:
 		go c.TransactionMessage(address, m, logger)
 	case Block:
-		go c.BlockMessage(address, m, logger, ctx)
+		go c.BlockMessage(ctx, address, m, logger)
 	case NeedBlocks:
-		go c.NeedBlocks(address, m, logger, ctx)
+		go c.NeedBlocks(ctx, address, m, logger)
 		//case DeleteMe:
 		//	go c.DeleteMeMessage(m, logger, ctx)
 	}
@@ -210,7 +209,7 @@ func (c *Node) GetPeer(address string) (connectedPeer, error) {
 	return peer, nil
 }
 
-func (c *Node) NeedBlocks(address string, message NeedBlocks, logger chan error, ctx context.Context) {
+func (c *Node) NeedBlocks(ctx context.Context, address string, message NeedBlocks, logger chan error) {
 	peer, err := c.GetPeer(address)
 	if err != nil {
 		logger <- err
@@ -228,7 +227,7 @@ func (c *Node) NeedBlocks(address string, message NeedBlocks, logger chan error,
 	}
 }
 
-func (c *Node) NodeInfoRespMessage(address string, message NodeInfoResp, logger chan error, ctx context.Context) {
+func (c *Node) NodeInfoRespMessage(ctx context.Context, address string, message NodeInfoResp, logger chan error) {
 	peer, err := c.GetPeer(address)
 	if err != nil {
 		logger <- err
@@ -286,18 +285,18 @@ func (c *Node) TransactionMessage(address string, transaction Transaction, logge
 	fmt.Println(address, "sent transaction to ", c.address)
 }
 
-func (c *Node) BlockMessage(address string, block Block, logger chan error, ctx context.Context) {
+func (c *Node) BlockMessage(ctx context.Context, address string, block Block, logger chan error) {
 	fmt.Println(address, "connected to ", c.address, " to offer block")
-	c.BlockValidating(address, block, logger, ctx)
+	c.BlockValidating(ctx, address, block, logger)
 
 	for _, message := range c.GetAndRemoveFromTmpBlocks(c.GetLastBlockNum() + 1) {
-		go c.BlockMessage(message.From, message.Data.(Block), logger, ctx)
+		go c.BlockMessage(ctx, message.From, message.Data.(Block), logger)
 	}
 
 	return
 }
 
-func (c *Node) BlockValidating(address string, block Block, logger chan error, ctx context.Context) {
+func (c *Node) BlockValidating(ctx context.Context, address string, block Block, logger chan error) {
 	c.blockMessageMutex.Lock()
 	defer c.blockMessageMutex.Unlock()
 
@@ -327,39 +326,38 @@ func (c *Node) BlockValidating(address string, block Block, logger chan error, c
 
 	tmpState := c.GetPieceOfState(validatorAddress, block.Transactions)
 
-	testBlock, err := c.BlockWithoutSign(lastBlocNum+1, block.Timestamp, block.Transactions, c.GetBlockByNumber(lastBlocNum).BlockHash, validatorAddress)
-	if err != nil {
+	handleErr := func(err error) {
 		c.BackState(tmpState)
 		logger <- ValidationError{address, block.BlockNum, err}
+	}
+
+	testBlock, err := c.BlockWithoutSign(lastBlocNum+1, block.Timestamp, block.Transactions, c.GetBlockByNumber(lastBlocNum).BlockHash, validatorAddress)
+	if err != nil {
+		handleErr(err)
 		return
 	}
 	if testBlock.BlockHash != block.BlockHash {
-		c.BackState(tmpState)
-		logger <- ValidationError{address, block.BlockNum, errors.New("hashes not equal")}
+		handleErr(errors.New("hashes not equal"))
 		return
 	}
 
 	pubKey, err := c.GetValidatorPubKey((block.BlockNum - 1) % c.GetValidatorsLength())
 	if err != nil {
-		c.BackState(tmpState)
-		logger <- ValidationError{address, block.BlockNum, err}
+		handleErr(err)
 		return
 	}
 
 	signVerify, err := block.VerifyBlockSign(pubKey)
 	if err != nil {
-		c.BackState(tmpState)
-		logger <- ValidationError{address, block.BlockNum, err}
+		handleErr(err)
 		return
 	}
 	if !signVerify {
-		c.BackState(tmpState)
-		logger <- ValidationError{address, block.BlockNum, errors.New("signs not equal")}
+		handleErr(errors.New("signs not equal"))
 		return
 	}
 	if err := c.insertBlock(block); err != nil {
-		c.BackState(tmpState)
-		logger <- ValidationError{address, block.BlockNum, err}
+		handleErr(err)
 		return
 	}
 
@@ -367,7 +365,8 @@ func (c *Node) BlockValidating(address string, block Block, logger chan error, c
 	go c.Broadcast(ctx, Message{address, block})
 
 	if c.AmIValidatorNow() {
-		err := c.CreateBlock(time.Now().Unix(), c.address, ctx)
+		// todo shadowing
+		err = c.CreateBlock(ctx, time.Now().Unix(), c.address)
 		if err != nil {
 			logger <- CreationBlockError{err.Error()}
 			return
@@ -408,14 +407,13 @@ func (c *Node) SetTmpBlocks(block Block, address string) {
 
 func (c *Node) GetBalance(account string) (uint64, error) {
 	c.state.RLock()
+defer c.state.RUnlock()
 
 	balance, ok := c.state.users[account]
 	if !ok {
-		c.state.RUnlock()
 		return 0, errors.New("unknown user")
 	}
 
-	c.state.RUnlock()
 	return balance, nil
 }
 
@@ -469,7 +467,7 @@ func (c *Node) NodeAddress() string {
 	return c.address
 }
 
-func (c *Node) CreateBlock(timestamp int64, address string, ctx context.Context) error {
+func (c *Node) CreateBlock(ctx context.Context, timestamp int64, address string) error {
 	transactions, err := c.PrepareTransactions()
 	if err != nil {
 		return nil
@@ -483,11 +481,11 @@ func (c *Node) CreateBlock(timestamp int64, address string, ctx context.Context)
 		return nil
 	}
 
-	if err := block.SignBlock(c.key); err != nil {
+	if err = block.SignBlock(c.key); err != nil {
 		return nil
 	}
 
-	if err := c.insertBlock(block); err != nil {
+	if err = c.insertBlock(block); err != nil {
 		return nil
 	}
 
@@ -629,7 +627,7 @@ func (c *Node) PrepareTransactions() ([]Transaction, error) {
 	return transactions, nil
 }
 
-func (c *Node) HandleErrors(err error, ctx context.Context) {
+func (c *Node) HandleErrors(ctx context.Context, err error) {
 	switch e := err.(type) {
 	case BlockMessageError:
 		return
