@@ -4,9 +4,25 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/gob"
+	"errors"
 )
 
-type Transaction struct {
+const (
+	MinFee = uint64(1)
+)
+
+type Transaction interface {
+	SignTransaction(key ed25519.PrivateKey) error
+	Hash() (string, error)
+	Bytes() ([]byte, error)
+	Verify() error
+	Execute(string, *State) error
+	GetSenderAddress() string
+	GetPrice() uint64
+	GetUsers() []string
+}
+
+type Transfer struct {
 	From   string
 	To     string
 	Amount uint64
@@ -16,7 +32,15 @@ type Transaction struct {
 	Signature []byte `json:"-"`
 }
 
-func (t *Transaction) SignTransaction(key ed25519.PrivateKey) error {
+type DeleteMe struct {
+	From   string
+	Fee    uint64
+	PubKey ed25519.PublicKey
+
+	Signature []byte
+}
+
+func (t *Transfer) SignTransaction(key ed25519.PrivateKey) error {
 	b, err := t.Bytes()
 	if err != nil {
 		return err
@@ -26,15 +50,15 @@ func (t *Transaction) SignTransaction(key ed25519.PrivateKey) error {
 	return nil
 }
 
-func (t Transaction) Hash() (string, error) {
+func (t *Transfer) Hash() (string, error) {
 	b, err := Bytes(t)
 	if err != nil {
 		return "", err
 	}
-	return Hash(b)
+	return Hash(b), nil
 }
 
-func (t Transaction) Bytes() ([]byte, error) {
+func (t *Transfer) Bytes() ([]byte, error) {
 	b := bytes.NewBuffer(nil)
 	err := gob.NewEncoder(b).Encode(t)
 	if err != nil {
@@ -42,4 +66,58 @@ func (t Transaction) Bytes() ([]byte, error) {
 	}
 
 	return b.Bytes(), nil
+}
+
+func (t Transfer) Verify() error {
+	if t.Fee < MinFee {
+		return errors.New("fee error")
+	}
+
+	tr := t
+	tr.Signature = []byte{}
+
+	b, err := tr.Bytes()
+	if err != nil {
+		return err
+	}
+	if address, err := PubKeyToAddress(t.PubKey); address != t.From || err != nil {
+		return errors.New("wrong address")
+	}
+	if !ed25519.Verify(t.PubKey, b, t.Signature) {
+		return errors.New("wrong signature")
+	}
+
+	return nil
+}
+
+func (t *Transfer) Execute(address string, state *State) error {
+	if _, ok := state.users[t.From]; !ok {
+		errors.New("user " + t.From + " not exist")
+	}
+	if _, ok := state.users[t.To]; !ok {
+		errors.New("user " + t.To + " not exist")
+	}
+	if state.users[t.From] < t.Amount+t.Fee {
+		errors.New("user " + t.From + " has lack of balance")
+	}
+
+	state.users[t.From] = state.users[t.From] - t.Amount - t.Fee
+	state.users[t.To] = state.users[t.To] + t.Amount
+	state.users[address] += t.Fee
+
+	return nil
+}
+
+func (t *Transfer) GetSenderAddress() string {
+	return t.From
+}
+
+func (t *Transfer) GetPrice() uint64 {
+	return t.Amount + t.Fee
+}
+
+func (t *Transfer) GetUsers() []string {
+	users := []string{t.From, t.To}
+
+	return users
 }

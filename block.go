@@ -57,16 +57,15 @@ func LoadGenesis() (genesis Genesis, err error) {
 	}
 
 	//to have ed25519.PublicKey in crypto.PublicKey interface
-	if err == nil {
-		genesis = Genesis{
-			Alloc:      tempGenesis.Alloc,
-			Validators: make([]crypto.PublicKey, len(tempGenesis.Validators)),
-		}
-
-		for i, v := range tempGenesis.Validators {
-			genesis.Validators[i] = v
-		}
+	genesis = Genesis{
+		Alloc:      tempGenesis.Alloc,
+		Validators: make([]crypto.PublicKey, len(tempGenesis.Validators)),
 	}
+
+	for i, v := range tempGenesis.Validators {
+		genesis.Validators[i] = v
+	}
+
 	return
 }
 
@@ -96,5 +95,5 @@ func (bl *Block) Hash() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return Hash(b)
+	return Hash(b), nil
 }

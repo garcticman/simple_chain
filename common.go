@@ -18,9 +18,9 @@ func PubKeyToAddress(key crypto.PublicKey) (string, error) {
 	return "", errors.New("incorrect key")
 }
 
-func Hash(b []byte) (string, error) {
+func Hash(b []byte) string {
 	hash := sha256.Sum256(b)
-	return hex.EncodeToString(hash[:]), nil
+	return hex.EncodeToString(hash[:])
 }
 
 func Bytes(v interface{}) ([]byte, error) {
@@ -28,21 +28,13 @@ func Bytes(v interface{}) ([]byte, error) {
 }
 
 func SaveToJSON(v interface{}, filename string) error {
-	file, err := os.OpenFile(filename, os.O_CREATE, os.ModePerm)
+	file, err := os.Create(filename)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 
-	encoder := json.NewEncoder(file)
-	encoder.Encode(v)
-	//
-	//bytes, _ := json.Marshal(v)
-	//if err := ioutil.WriteFile(filename, bytes, 0644); err != nil {
-	//	return err
-	//}
-
-	return nil
+	return json.NewEncoder(file).Encode(v)
 }
 
 func ReadFromJSON(filename string, data interface{}) error {
@@ -52,13 +44,5 @@ func ReadFromJSON(filename string, data interface{}) error {
 	}
 	defer file.Close()
 
-	decoder := json.NewDecoder(file)
-
-	//decoder.Token()
-
-	for decoder.More() {
-		decoder.Decode(data)
-	}
-
-	return nil
+	return json.NewDecoder(file).Decode(data)
 }

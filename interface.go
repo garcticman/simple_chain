@@ -13,7 +13,7 @@ type Blockchain interface {
 type PublicAPI interface {
 	//network
 	AddPeer(Blockchain) error
-	RemovePeer(Blockchain) error
+	//RemovePeer(Blockchain) error
 
 	//for clients
 	GetBalance(account string) (uint64, error)

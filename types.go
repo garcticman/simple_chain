@@ -5,8 +5,14 @@ import (
 	"crypto"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 )
+
+type State struct {
+	users map[string]uint64
+	sync.RWMutex
+}
 
 // first block with blockchain settings
 type Genesis struct {
@@ -21,7 +27,7 @@ func (g Genesis) ToBlock() Block {
 
 	i := 0
 	for key, amount := range g.Alloc {
-		transactions[i] = Transaction{
+		transactions[i] = &Transfer{
 			From:      "",
 			To:        key,
 			Amount:    amount,
@@ -32,7 +38,7 @@ func (g Genesis) ToBlock() Block {
 		i++
 	}
 	sort.Slice(transactions, func(i, j int) bool {
-		return transactions[i].To < transactions[j].To
+		return transactions[i].(*Transfer).To < transactions[j].(*Transfer).To
 	})
 
 	block := Block{

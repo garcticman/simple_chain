@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto"
 	"crypto/ed25519"
-	"errors"
 	"fmt"
 	"github.com/stretchr/testify/require"
 	"reflect"
@@ -40,7 +39,7 @@ func InitForTest(numOfPeers, numOfValidators int) ([]*Node, error) {
 	}
 
 	var err error
-	for i := 0; i < 3; i++ {
+	for i := 0; i < numOfPeers; i++ {
 		peers[i], err = NewNode(keys[i], genesis)
 		if err != nil {
 			return nil, err
@@ -52,10 +51,29 @@ func InitForTest(numOfPeers, numOfValidators int) ([]*Node, error) {
 	return peers, nil
 }
 
+func TestRemoveValidator(t *testing.T) {
+	peer := Node{validators: make([]ed25519.PublicKey, 3)}
+	pubKeys := make([]crypto.PublicKey, 3)
+
+	for i := range peer.validators {
+		pubKeys[i], _, _ = ed25519.GenerateKey(nil)
+	}
+
+	peer.validators = sortValidators(pubKeys)
+
+	publicKey := peer.validators[2]
+	peer.RemoveValidator(publicKey)
+	for _, v := range peer.validators {
+		if reflect.DeepEqual(v, publicKey) {
+			t.Fail()
+		}
+	}
+}
+
 func TestAddTransaction(t *testing.T) {
 	peer := Node{transactionPool: map[string]Transaction{}}
 
-	err := peer.AddTransaction(Transaction{
+	err := peer.AddTransaction(&Transfer{
 		From:      "",
 		To:        "",
 		Amount:    0,
@@ -70,7 +88,7 @@ func TestAddTransaction(t *testing.T) {
 	_, key, _ := ed25519.GenerateKey(nil)
 	address, _ := PubKeyToAddress(key.Public())
 
-	err = peer.AddTransaction(Transaction{
+	err = peer.AddTransaction(&Transfer{
 		From:      address,
 		To:        "ABC",
 		Amount:    0,
@@ -82,7 +100,7 @@ func TestAddTransaction(t *testing.T) {
 		t.Fail()
 	}
 
-	tr := Transaction{
+	tr := Transfer{
 		From:      address,
 		To:        "ABC",
 		Amount:    0,
@@ -93,71 +111,9 @@ func TestAddTransaction(t *testing.T) {
 
 	tr.SignTransaction(key)
 
-	err = peer.AddTransaction(tr)
+	err = peer.AddTransaction(&tr)
 	if err != nil {
 		t.Error(err)
-	}
-}
-
-func TestBlockMessage(t *testing.T) {
-	peers, err := InitForTest(3, 3)
-	if err != nil {
-		t.Error(err)
-	}
-
-	block := Block{
-		BlockNum:      1,
-		Timestamp:     time.Now().Unix(),
-		Transactions:  nil,
-		BlockHash:     "",
-		PrevBlockHash: "",
-		StateHash:     "",
-		Signature:     nil,
-	}
-
-	logger := make(chan error, 1)
-
-	peers[1].BlockMessage(peers[0].address, block, logger, context.TODO())
-	if !reflect.DeepEqual(<-logger, ValidationError{address: peers[0].address, numOfBlock: block.BlockNum, error: errors.New("hashes not equal")}) {
-		t.Fail()
-	}
-
-	block.PrevBlockHash = peers[0].blocks[0].BlockHash
-	peers[0].state[peers[0].address] += 1000
-
-	bytes, _ := Bytes(peers[0].state)
-	block.StateHash, _ = Hash(bytes)
-	block.BlockHash, _ = block.Hash()
-	if err := block.SignBlock(peers[0].key); err != nil {
-		t.Error(err)
-	}
-
-	peers[1].BlockMessage(peers[0].address, block, logger, context.TODO())
-	select {
-	case <-logger:
-		t.Error(err)
-	default:
-	}
-	peers[2].BlockMessage(peers[0].address, block, logger, context.TODO())
-	select {
-	case <-logger:
-		t.Error(err)
-	default:
-	}
-
-	peers[2].BlockMessage(peers[1].address, peers[1].GetBlockByNumber(2), logger, context.TODO())
-	select {
-	case <-logger:
-		t.Error(err)
-	default:
-	}
-
-	if len(peers[2].blocks) != 4 {
-		t.Fail()
-	}
-
-	if peers[2].GetState()[peers[0].address] != 2000 && peers[2].GetState()[peers[1].address] != 2000 && peers[2].GetState()[peers[2].address] != 2000 {
-		t.Fail()
 	}
 }
 
@@ -194,11 +150,12 @@ func TestSync(t *testing.T) {
 
 	for _, peer := range peers {
 		if peer.AmIValidatorNow() {
-			block, err := peer.CreateBlock(peer.GetLastBlockNum()+1, time.Now().Unix(), nil, peer.GetBlockByNumber(0).BlockHash)
+			address, err := peer.GetValidatorAddress()
+
+			err = peer.CreateBlock(time.Now().Unix(), address, context.TODO())
 			if err != nil {
 				t.Error(err)
 			}
-			peer.insertBlock(block)
 			break
 		}
 	}
@@ -241,34 +198,34 @@ func TestStartingBlockchain(t *testing.T) {
 
 	for _, node := range peers {
 		if node.AmIValidatorNow() {
-			transactions, err := node.PrepareTransactions()
+			err := node.CreateBlock(time.Now().Unix(), node.address, context.TODO())
 			if err != nil {
 				t.Error(err)
-			}
-
-			block, err := node.CreateBlock(node.lastBlockNum+1, time.Now().Unix(), transactions, node.GetBlockByNumber(node.lastBlockNum).BlockHash)
-			if err != nil {
-				t.Error(err)
-			}
-
-			if err := node.insertBlock(block); err != nil {
-				t.Error(err)
-			}
-			context := context.Background()
-			message := Message{
-				From: node.NodeAddress(),
-				Data: block,
-			}
-
-			for _, peer := range node.peers {
-				peer.Send(context, message)
 			}
 
 			break
 		}
 	}
 
-	tr := Transaction{
+	//time.Sleep(time.Second)
+	//pubKey := peers[2].NodeKey().(ed25519.PublicKey)
+	//err = peers[2].RemoveValidator(pubKey)
+	//if err != nil {
+	//	t.Error(err)
+	//}
+
+	//peers[2].SendRemoveValidator(pubKey, context.TODO())
+	//time.Sleep(time.Second)
+	//
+	//for _, peer := range peers {
+	//	peer.validatorsMutex.Lock()
+	//	if _, err := peer.FindValidatorByPubKey(pubKey); err == nil {
+	//		t.Fail()
+	//	}
+	//	peer.validatorsMutex.Unlock()
+	//}
+
+	tr := Transfer{
 		From:   peers[3].NodeAddress(),
 		To:     peers[4].NodeAddress(),
 		Amount: 100,
@@ -281,14 +238,14 @@ func TestStartingBlockchain(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := peers[3].AddTransaction(tr); err != nil {
+	if err := peers[3].AddTransaction(&tr); err != nil {
 		t.Error(err)
 	}
 
 	context := context.Background()
 	message := Message{
 		From: peers[3].NodeAddress(),
-		Data: tr,
+		Data: Transaction(&tr),
 	}
 
 	peers[3].Broadcast(context, message)
