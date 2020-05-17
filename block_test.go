@@ -6,6 +6,7 @@ package bc
 //	initialBalance := uint64(100000)
 //
 //	genesis := Genesis{
+//		&ChainConfig{TwoSigns: 20},
 //		make(map[string]uint64),
 //		make([]crypto.PublicKey, 0, numOfValidators),
 //	}

@@ -14,8 +14,42 @@ type State struct {
 	sync.RWMutex
 }
 
+type TransactionNonce struct {
+	usersNonce map[string]uint64
+	sync.RWMutex
+}
+
+func (tn *TransactionNonce) GetNonce(address string) uint64 {
+	tn.RLock()
+	nonce := tn.usersNonce[address]
+	tn.RUnlock()
+
+	return nonce
+}
+
+func (tn *TransactionNonce) AddNonce(address string) {
+	tn.Lock()
+	tn.usersNonce[address]++
+	tn.Unlock()
+}
+
+func (tn *TransactionNonce) Compare(address string, nonce uint64) (res int8) {
+	tn.Lock()
+	switch true {
+	case tn.usersNonce[address]+1 < nonce:
+		res = -1
+	case tn.usersNonce[address] > nonce:
+		res = 1
+	default:
+	}
+	tn.Unlock()
+
+	return
+}
+
 // first block with blockchain settings
 type Genesis struct {
+	ChainConfig *ChainConfig
 	//Account -> funds
 	Alloc map[string]uint64
 	//list of validators public keys
