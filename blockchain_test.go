@@ -4,10 +4,10 @@ import (
 	"context"
 	"crypto"
 	"crypto/ed25519"
-	"errors"
 	"fmt"
 	"github.com/stretchr/testify/require"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -15,6 +15,7 @@ import (
 func InitForTest(numOfPeers, numOfValidators int) ([]*Node, error) {
 
 	genesis := Genesis{
+		&ChainConfig{TwoSigns: 20},
 		make(map[string]uint64),
 		make([]crypto.PublicKey, 0, numOfPeers),
 	}
@@ -40,7 +41,7 @@ func InitForTest(numOfPeers, numOfValidators int) ([]*Node, error) {
 	}
 
 	var err error
-	for i := 0; i < 3; i++ {
+	for i := 0; i < numOfPeers; i++ {
 		peers[i], err = NewNode(keys[i], genesis)
 		if err != nil {
 			return nil, err
@@ -52,79 +53,106 @@ func InitForTest(numOfPeers, numOfValidators int) ([]*Node, error) {
 	return peers, nil
 }
 
-func TestBlockMessage(t *testing.T) {
-	peers, err := InitForTest(3, 3)
+func TestRemoveValidator(t *testing.T) {
+	peer := Node{validators: Validators{pubKeys: make([]ed25519.PublicKey, 3)}}
+	pubKeys := make([]crypto.PublicKey, 3)
+
+	for i := range peer.validators.pubKeys {
+		pubKeys[i], _, _ = ed25519.GenerateKey(nil)
+	}
+
+	peer.validators.pubKeys = sortValidators(convertValidators(pubKeys))
+
+	publicKey := peer.validators.pubKeys[2]
+	peer.validators.RemoveValidator(publicKey)
+	for _, v := range peer.validators.pubKeys {
+		if reflect.DeepEqual(v, publicKey) {
+			t.Fail()
+		}
+	}
+}
+
+func TestRemoveValidatorWithAmIValidator(t *testing.T) {
+	peers, err := InitForTest(5, 5)
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 
-	block := Block{
-		BlockNum:      1,
-		Timestamp:     time.Now().Unix(),
-		Transactions:  nil,
-		BlockHash:     "",
-		PrevBlockHash: "",
-		StateHash:     "",
-		Signature:     nil,
+	for _, v := range peers {
+		publicKey := v.validators.pubKeys[2]
+		v.validators.RemoveValidator(publicKey)
 	}
 
-	logger := make(chan error, 1)
+	var i int
+	for _, v := range peers {
+		if v.AmIValidatorNow(v.lastBlockNum) {
+			i++
+		}
+	}
 
-	peers[1].BlockMessage(peers[0].address, block, logger, context.TODO())
-	if !reflect.DeepEqual(<-logger, ValidationError{address: peers[0].address, numOfBlock: block.BlockNum, error: errors.New("hashes not equal")}) {
+	require.Equal(t, 1, i)
+}
+
+func TestAddTransaction(t *testing.T) {
+	peer := Node{transactionPool: map[string]Transaction{}}
+
+	err := peer.AddTransaction(&Transfer{
+		From:      "",
+		To:        "",
+		Amount:    0,
+		Fee:       10,
+		PubKey:    nil,
+		Signature: nil,
+	})
+	if err == nil {
 		t.Fail()
 	}
 
-	block.PrevBlockHash = peers[0].blocks[0].BlockHash
-	peers[0].state[peers[0].address] += 1000
+	_, key, _ := ed25519.GenerateKey(nil)
+	address, _ := PubKeyToAddress(key.Public())
 
-	bytes, _ := Bytes(peers[0].state)
-	block.StateHash, _ = Hash(bytes)
-	block.BlockHash, _ = block.Hash()
-	if err := block.SignBlock(peers[0].key); err != nil {
-		t.Error(err)
-	}
-
-	peers[1].BlockMessage(peers[0].address, block, logger, context.TODO())
-	select {
-	case <-logger:
-		t.Error(err)
-	default:
-	}
-	peers[2].BlockMessage(peers[0].address, block, logger, context.TODO())
-	select {
-	case <-logger:
-		t.Error(err)
-	default:
-	}
-
-	peers[2].BlockMessage(peers[1].address, peers[1].blocks[2], logger, context.TODO())
-	select {
-	case <-logger:
-		t.Error(err)
-	default:
-	}
-
-	if len(peers[2].blocks) != 4 {
+	err = peer.AddTransaction(&Transfer{
+		From:      address,
+		To:        "ABC",
+		Amount:    0,
+		Fee:       0,
+		PubKey:    nil,
+		Signature: nil,
+	})
+	if err == nil {
 		t.Fail()
 	}
 
-	if peers[2].state[peers[0].address] != 2000 && peers[2].state[peers[1].address] != 2000 && peers[2].state[peers[2].address] != 2000 {
-		t.Fail()
+	var tr Transaction
+
+	tr = &Transfer{
+		From:      address,
+		To:        "ABC",
+		Amount:    0,
+		Fee:       1,
+		PubKey:    key.Public().(ed25519.PublicKey),
+		Signature: nil,
+	}
+
+	tr.SignTransaction(key)
+
+	err = peer.AddTransaction(tr)
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
 func TestAmIValidatorNow(t *testing.T) {
 	peers, err := InitForTest(3, 3)
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 
 	for i := 0; i < 10; i++ {
 		for _, peer := range peers {
-			if peer.AmIValidatorNow() {
+			if peer.AmIValidatorNow(uint64(i)) {
 				if err != nil {
-					t.Error(err)
+					t.Fatal(err)
 				}
 				peers[0].blocks = append(peers[0].blocks, Block{})
 				peers[1].blocks = append(peers[1].blocks, Block{})
@@ -142,16 +170,17 @@ func TestAmIValidatorNow(t *testing.T) {
 func TestSync(t *testing.T) {
 	peers, err := InitForTest(3, 3)
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 
 	for _, peer := range peers {
-		if peer.AmIValidatorNow() {
-			block, err := peer.CreateBlock(peer.lastBlockNum+1, time.Now().Unix(), nil, peer.blocks[0].BlockHash)
+		if peer.AmIValidatorNow(peer.GetLastBlockNum()) {
+			address, err := peer.validators.GetValidatorAddress(peer.GetLastBlockNum())
+
+			err = peer.CreateBlock(context.TODO(), time.Now().Unix(), address)
 			if err != nil {
-				t.Error(err)
+				t.Fatal(err)
 			}
-			peer.insertBlock(block)
 			break
 		}
 	}
@@ -160,19 +189,20 @@ func TestSync(t *testing.T) {
 		for j := i + 1; j < 3; j++ {
 			err := peers[i].AddPeer(peers[j])
 			if err != nil {
-				t.Error(err)
+				t.Fatal(err)
 			}
 		}
 	}
 
-	time.Sleep(time.Second * 10)
+	time.Sleep(time.Second)
 
-	require.Equal(t, peers[1].blocks[1], peers[0].blocks[1])
-	require.Equal(t, peers[2].blocks[1], peers[0].blocks[1])
+	require.Equal(t, peers[1].GetBlockByNumber(1), peers[0].GetBlockByNumber(1))
+	require.Equal(t, peers[2].GetBlockByNumber(1), peers[0].GetBlockByNumber(1))
 }
 
 func TestStartingBlockchain(t *testing.T) {
 	var err error
+	initialBalance := uint64(10000)
 
 	peers := make([]*Node, 5)
 	for i := 0; i < 5; i++ {
@@ -186,60 +216,80 @@ func TestStartingBlockchain(t *testing.T) {
 		for j := i + 1; j < len(peers); j++ {
 			err = peers[i].AddPeer(peers[j])
 			if err != nil {
-				t.Error(err)
+				t.Fatal(err)
 			}
 		}
 	}
 
 	for _, node := range peers {
-
-		if node.AmIValidatorNow() {
-			transactions, err := node.PrepareTransactions()
+		if node.AmIValidatorNow(node.GetLastBlockNum()) {
+			err := node.CreateBlock(context.TODO(), time.Now().Unix(), node.address)
 			if err != nil {
-				t.Error(err)
-			}
-
-			block, err := node.CreateBlock(node.lastBlockNum+1, time.Now().Unix(), transactions, node.GetBlockByNumber(node.lastBlockNum).BlockHash)
-			if err != nil {
-				t.Error(err)
-			}
-
-			if err := node.insertBlock(block); err != nil {
-				t.Error(err)
-			}
-			context := context.Background()
-			message := Message{
-				From: node.NodeAddress(),
-				Data: block,
-			}
-
-			for _, peer := range node.peers {
-				peer.Send(context, message)
+				t.Fatal(err)
 			}
 
 			break
 		}
 	}
 
-	tr := Transaction{
+	time.Sleep(time.Second)
+	pubKey := peers[2].NodeKey().(ed25519.PublicKey)
+
+	var tr Transaction
+	tr = &DeleteMe{
+		From:      peers[2].address,
+		Fee:       1,
+		PubKey:    pubKey,
+		Signature: nil,
+		Nonce:     peers[2].transactionNonce.GetNonce(peers[2].address),
+	}
+
+	err = tr.SignTransaction(peers[2].key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := peers[2].AddTransaction(tr); err != nil {
+		t.Fatal(err)
+	}
+
+	context := context.Background()
+	message := Message{
+		From: peers[2].NodeAddress(),
+		Data: tr,
+	}
+
+	peers[2].Broadcast(context, message)
+
+	time.Sleep(time.Second)
+
+	for _, peer := range peers {
+		peer.validators.Lock()
+		if _, err := peer.validators.FindValidatorByPubKey(pubKey); err == nil {
+			t.Fail()
+		}
+		peer.validators.Unlock()
+	}
+
+	tr = &Transfer{
 		From:   peers[3].NodeAddress(),
 		To:     peers[4].NodeAddress(),
 		Amount: 100,
 		Fee:    10,
 		PubKey: peers[3].NodeKey().(ed25519.PublicKey),
+		Nonce:  peers[3].transactionNonce.GetNonce(peers[3].address),
 	}
 
-	tr, err = peers[3].SignTransaction(tr)
+	err = tr.SignTransaction(peers[3].key)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	if err := peers[3].AddTransaction(tr); err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 
-	context := context.Background()
-	message := Message{
+	message = Message{
 		From: peers[3].NodeAddress(),
 		Data: tr,
 	}
@@ -247,87 +297,14 @@ func TestStartingBlockchain(t *testing.T) {
 	peers[3].Broadcast(context, message)
 
 	time.Sleep(time.Second)
-	for _, peer := range peers {
-		peer.AmIValidatorNow()
-	}
-}
 
-func TestSendTransactionSuccess(t *testing.T) {
-	numOfPeers := 5
-	numOfValidators := 3
-	initialBalance := uint64(100000)
-	peers := make([]Blockchain, numOfPeers)
-
-	genesis := Genesis{
-		make(map[string]uint64),
-		make([]crypto.PublicKey, 0, numOfValidators),
-	}
-
-	keys := make([]ed25519.PrivateKey, numOfPeers)
-	for i := range keys {
-		_, key, err := ed25519.GenerateKey(nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		keys[i] = key
-		if numOfValidators > 0 {
-			genesis.Validators = append(genesis.Validators, key.Public())
-			numOfValidators--
-		}
-
-		address, err := PubKeyToAddress(key.Public())
-		if err != nil {
-			t.Error(err)
-		}
-		genesis.Alloc[address] = initialBalance
-	}
-
-	var err error
-	for i := 0; i < numOfPeers; i++ {
-		peers[i], err = NewNode(keys[i], genesis)
-		if err != nil {
-			t.Error(err)
-		}
-	}
-
-	for i := 0; i < len(peers); i++ {
-		for j := i + 1; j < len(peers); j++ {
-			err = peers[i].AddPeer(peers[j])
-			if err != nil {
-				t.Error(err)
-			}
-		}
-	}
-
-	tr := Transaction{
-		From:   peers[3].NodeAddress(),
-		To:     peers[4].NodeAddress(),
-		Amount: 100,
-		Fee:    10,
-		PubKey: keys[3].Public().(ed25519.PublicKey),
-	}
-
-	tr, err = peers[3].SignTransaction(tr)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	err = peers[0].AddTransaction(tr)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	//wait transaction processing
-	time.Sleep(time.Second * 5)
-
-	//check "from" balance
 	balance, err := peers[0].GetBalance(peers[3].NodeAddress())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if balance != initialBalance-100-10 {
-		t.Fatal("Incorrect from balance")
+	if (balance+110)%1000 != 0 {
+		t.Fatal("Incorrect from balance " + strconv.FormatUint(balance, 10))
 	}
 
 	//check "to" balance
@@ -336,19 +313,20 @@ func TestSendTransactionSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if balance != initialBalance+100 {
+	if (balance-100)%1000 != 0 {
 		t.Fatal("Incorrect to balance")
 	}
 
 	//check validators balance
-	for i := 0; i < 3; i++ {
-		balance, err = peers[0].GetBalance(peers[i].NodeAddress())
+	for _, pubKey := range peers[0].validators.pubKeys {
+		address, _ := PubKeyToAddress(pubKey)
+		balance, err = peers[0].GetBalance(address)
 		if err != nil {
-			t.Error(err)
+			t.Fatal(err)
 		}
 
-		if balance > initialBalance {
-			t.Error("Incorrect validator balance")
+		if balance < initialBalance {
+			t.Fatal("Incorrect validator balance")
 		}
 	}
 }

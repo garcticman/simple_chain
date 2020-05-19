@@ -1,9 +1,11 @@
 package bc
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/ed25519"
 	"fmt"
+	"sort"
 )
 
 func MyNode(peer string) (*Node, error) {
@@ -29,4 +31,12 @@ func convertValidators(validators []crypto.PublicKey) []ed25519.PublicKey {
 	}
 
 	return validatorsTmp
+}
+
+func sortValidators(validators []ed25519.PublicKey) []ed25519.PublicKey {
+	sort.Slice(validators, func(i, j int) bool {
+		return bytes.Compare(validators[i], validators[j]) < 0
+	})
+
+	return validators
 }

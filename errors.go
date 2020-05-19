@@ -3,9 +3,9 @@ package bc
 import "fmt"
 
 type ValidationError struct {
-	address string
+	address    string
 	numOfBlock uint64
-	error error
+	error      error
 }
 
 func (ve ValidationError) Error() string {
@@ -22,11 +22,20 @@ func (bme BlockMessageError) Error() string {
 
 type OrderError struct {
 	address string
-	block Block
+	block   Block
 }
 
 func (oe OrderError) Error() string {
 	return fmt.Sprintf("block from %s not applyed, not next in order", oe.address)
+}
+
+type TwoSignsError struct {
+	address string
+	block   Block
+}
+
+func (twe TwoSignsError) Error() string {
+	return fmt.Sprintf("block from %s not applyed, not next in order", twe.address)
 }
 
 type CreationBlockError struct {

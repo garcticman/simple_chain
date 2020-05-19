@@ -1,56 +1,55 @@
 package bc
 
 import (
-	"bytes"
 	"context"
 	"crypto"
-	"crypto/ed25519"
-	"encoding/gob"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 )
 
-type Block struct {
-	BlockNum      uint64
-	Timestamp     int64
-	Transactions  []Transaction
-	BlockHash     string `json:"-"`
-	PrevBlockHash string
-	StateHash     string
-	Signature     []byte `json:"-"`
+type State struct {
+	users map[string]uint64
+	sync.RWMutex
 }
 
-type Transaction struct {
-	From   string
-	To     string
-	Amount uint64
-	Fee    uint64
-	PubKey ed25519.PublicKey
-
-	Signature []byte `json:"-"`
+type TransactionNonce struct {
+	usersNonce map[string]uint64
+	sync.RWMutex
 }
 
-func (t Transaction) Hash() (string, error) {
-	b, err := Bytes(t)
-	if err != nil {
-		return "", err
+func (tn *TransactionNonce) GetNonce(address string) uint64 {
+	tn.RLock()
+	nonce := tn.usersNonce[address]
+	tn.RUnlock()
+
+	return nonce
+}
+
+func (tn *TransactionNonce) AddNonce(address string) {
+	tn.Lock()
+	tn.usersNonce[address]++
+	tn.Unlock()
+}
+
+func (tn *TransactionNonce) Compare(address string, nonce uint64) (res int8) {
+	tn.Lock()
+	switch true {
+	case tn.usersNonce[address]+1 < nonce:
+		res = -1
+	case tn.usersNonce[address] > nonce:
+		res = 1
+	default:
 	}
-	return Hash(b)
-}
+	tn.Unlock()
 
-func (t Transaction) Bytes() ([]byte, error) {
-	b := bytes.NewBuffer(nil)
-	err := gob.NewEncoder(b).Encode(t)
-	if err != nil {
-		return nil, err
-	}
-
-	return b.Bytes(), nil
+	return
 }
 
 // first block with blockchain settings
 type Genesis struct {
+	ChainConfig *ChainConfig
 	//Account -> funds
 	Alloc map[string]uint64
 	//list of validators public keys
@@ -62,7 +61,7 @@ func (g Genesis) ToBlock() Block {
 
 	i := 0
 	for key, amount := range g.Alloc {
-		transactions[i] = Transaction{
+		transactions[i] = &Transfer{
 			From:      "",
 			To:        key,
 			Amount:    amount,
@@ -73,7 +72,7 @@ func (g Genesis) ToBlock() Block {
 		i++
 	}
 	sort.Slice(transactions, func(i, j int) bool {
-		return transactions[i].To < transactions[j].To
+		return transactions[i].(*Transfer).To < transactions[j].(*Transfer).To
 	})
 
 	block := Block{
