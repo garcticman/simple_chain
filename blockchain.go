@@ -6,8 +6,8 @@ import (
 	"crypto"
 	"crypto/ed25519"
 	"errors"
-	"fmt"
 	"log"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -36,7 +36,7 @@ func NewNode(key ed25519.PrivateKey, genesis Genesis) (*Node, error) {
 		state:            State{users: make(map[string]uint64)},
 		transactionPool:  make(map[string]Transaction),
 		tmpBlocks:        make(map[uint64][]Message),
-		transactionNonce: TransactionNonce{usersNonce: make(map[string]uint64)},
+		TransactionNonce: TransactionNonce{usersNonce: make(map[string]uint64)},
 	}
 
 	return node, err
@@ -49,8 +49,9 @@ type Node struct {
 	address      string
 	genesis      Genesis
 	lastBlockNum uint64
+	nonce        uint64
 
-	transactionNonce TransactionNonce
+	TransactionNonce TransactionNonce
 
 	//state
 	blocks      []Block
@@ -59,7 +60,6 @@ type Node struct {
 	peers      map[string]connectedPeer
 	peersMutex sync.RWMutex
 	//hash(state) - хеш от упорядоченного слайса ключ-значение
-	//todo hash()
 	state State
 
 	validators Validators
@@ -73,6 +73,10 @@ type Node struct {
 
 	blockMessageMutex       sync.Mutex
 	transactionMessageMutex sync.Mutex
+}
+
+func (c *Node) PrivateKey() ed25519.PrivateKey {
+	return c.key
 }
 
 func (c *Node) NodeKey() crypto.PublicKey {
@@ -127,7 +131,6 @@ func (c *Node) AddPeer(peer Blockchain) error {
 }
 
 func (c *Node) peerLoop(ctx context.Context, peer connectedPeer) {
-	//todo handshake
 	peer.Send(ctx, Message{
 		From: c.NodeAddress(),
 		Data: NodeInfoResp{
@@ -147,7 +150,7 @@ func (c *Node) peerLoop(ctx context.Context, peer connectedPeer) {
 			c.processMessage(ctx, peer.Address, msg, logger)
 		case err := <-logger:
 			if err != nil {
-				log.Println("Process msg", err)
+				//log.Println("Process msg", err)
 			}
 
 			c.HandleErrors(ctx, err)
@@ -156,6 +159,8 @@ func (c *Node) peerLoop(ctx context.Context, peer connectedPeer) {
 }
 
 func (c *Node) processMessage(ctx context.Context, address string, msg Message, logger chan error) {
+	//time.Sleep(time.Millisecond)
+
 	switch m := msg.Data.(type) {
 	//example
 	case NodeInfoResp:
@@ -198,12 +203,16 @@ func (c *Node) NeedBlocks(ctx context.Context, address string, message NeedBlock
 		return
 	}
 
-	fmt.Println(c.address, "connected to ", address, "to sync")
-
 	for i := uint64(message) + 1; i <= c.GetLastBlockNum(); i++ {
+		block, err := c.GetBlockByNumber(i)
+		if err != nil {
+			logger <- err
+			return
+		}
+
 		blockMessage := Message{
 			From: c.NodeAddress(),
-			Data: c.GetBlockByNumber(i),
+			Data: block,
 		}
 		peer.Send(ctx, blockMessage)
 	}
@@ -229,8 +238,6 @@ func (c *Node) TransactionMessage(address string, transaction Transaction, logge
 	c.transactionMessageMutex.Lock()
 	defer c.transactionMessageMutex.Unlock()
 
-	fmt.Println(address, "connected to ", c.address, " to offer transaction")
-
 	hash, err := transaction.Hash()
 	if err != nil {
 		logger <- err
@@ -244,12 +251,9 @@ func (c *Node) TransactionMessage(address string, transaction Transaction, logge
 		logger <- err
 		return
 	}
-
-	fmt.Println(address, "sent transaction to ", c.address)
 }
 
 func (c *Node) BlockMessage(ctx context.Context, address string, block Block, logger chan error) {
-	fmt.Println(address, "connected to ", c.address, " to offer block")
 	c.BlockValidating(ctx, address, block, logger)
 
 	for _, message := range c.GetAndRemoveFromTmpBlocks(c.GetLastBlockNum() + 1) {
@@ -268,12 +272,14 @@ func (c *Node) BlockValidating(ctx context.Context, address string, block Block,
 		logger <- BlockMessageError{address + "didn't send block to " + c.address + "(offer declined), already exist"}
 		return
 	}
+
 	if block.BlockNum > lastBlocNum+1 {
 		c.SetTmpBlocks(block, address)
 
 		logger <- OrderError{address: address, block: block}
 		return
 	}
+
 	pubKey, err := c.validators.GetValidatorPubKey((block.BlockNum - 1) % c.validators.GetValidatorsLength())
 	if err != nil {
 		logger <- ValidationError{address, block.BlockNum, err}
@@ -289,9 +295,12 @@ func (c *Node) BlockValidating(ctx context.Context, address string, block Block,
 		return
 	}
 
-	if IsForked(c.chainConfig.TwoSigns, lastBlocNum) {
+	if IsForked(c.chainConfig.TwoSigns, block.BlockNum) {
 		if c.AmIValidatorNow(lastBlocNum + 1) {
 			block.SignatureTwo, err = block.SignBlock(c.key)
+			if block.SignatureTwo == nil {
+				runtime.Breakpoint()
+			}
 			if err != nil {
 				logger <- ValidationError{address, block.BlockNum, err}
 				return
@@ -336,9 +345,16 @@ func (c *Node) BlockValidating(ctx context.Context, address string, block Block,
 	handleErr := func(err error) {
 		c.RollBack(tmpState, tmpValidators)
 		logger <- ValidationError{address, block.BlockNum, err}
+		return
+	}
+	prevBlock, err := c.GetBlockByNumber(lastBlocNum)
+	if err != nil {
+		c.RollBack(tmpState, tmpValidators)
+		logger <- ValidationError{address, block.BlockNum, err}
+		return
 	}
 
-	testBlock, err := c.BlockWithoutSign(lastBlocNum+1, block.Timestamp, block.Transactions, c.GetBlockByNumber(lastBlocNum).BlockHash, validatorAddress)
+	testBlock, err := c.BlockWithoutSign(lastBlocNum+1, block.Timestamp, block.Transactions, prevBlock.BlockHash, validatorAddress)
 	if err != nil {
 		handleErr(err)
 		return
@@ -347,12 +363,11 @@ func (c *Node) BlockValidating(ctx context.Context, address string, block Block,
 		handleErr(err)
 		return
 	}
-	if err := c.insertBlock(block); err != nil {
+	if err := c.insertBlock(ctx, block); err != nil {
 		handleErr(err)
 		return
 	}
 
-	fmt.Println(address, "sent block to ", c.address)
 	go c.Broadcast(ctx, Message{address, block})
 
 	if c.AmIValidatorNow(c.GetLastBlockNum()) {
@@ -427,7 +442,7 @@ func (c *Node) AddTransaction(transaction Transaction) error {
 	c.transactionsMutex.Lock()
 	defer c.transactionsMutex.Unlock()
 
-	if c.transactionNonce.Compare(transaction.GetSenderAddress(), transaction.GetNonce()) == 1 {
+	if c.TransactionNonce.Compare(transaction.GetSenderAddress(), transaction.GetNonce()) == 1 {
 		return nil
 	}
 
@@ -445,12 +460,16 @@ func (c *Node) AddTransaction(transaction Transaction) error {
 	return nil
 }
 
-func (c *Node) GetBlockByNumber(blockNum uint64) Block {
+func (c *Node) GetBlockByNumber(blockNum uint64) (Block, error) {
 	c.blocksMutex.RLock()
-	block := c.blocks[blockNum]
-	c.blocksMutex.RUnlock()
+	defer c.blocksMutex.RUnlock()
 
-	return block
+	if blockNum >= uint64(len(c.blocks)) {
+		return Block{}, errors.New("block not exist")
+	}
+	block := c.blocks[blockNum]
+
+	return block, nil
 }
 
 func (c *Node) NodeInfo() NodeInfoResp {
@@ -468,7 +487,12 @@ func (c *Node) CreateBlock(ctx context.Context, timestamp int64, address string)
 	}
 
 	lastBlockNum := c.GetLastBlockNum()
-	prevBlockHash := c.GetBlockByNumber(lastBlockNum).BlockHash
+
+	prevBlock, err := c.GetBlockByNumber(lastBlockNum)
+	if err != nil {
+		return err
+	}
+	prevBlockHash := prevBlock.BlockHash
 
 	tmpState, tmpValidators := c.GetPieceOfStateAndValidators(c.address, transactions)
 
@@ -484,10 +508,13 @@ func (c *Node) CreateBlock(ctx context.Context, timestamp int64, address string)
 		return nil
 	}
 
-	if err := c.insertBlock(block); err != nil {
+	//TODO убрать применение блока если форк случился
+	//if !IsForked(c.chainConfig.TwoSigns, block.BlockNum) {
+	if err := c.insertBlock(ctx, block); err != nil {
 		c.RollBack(tmpState, tmpValidators)
 		return nil
 	}
+	//}
 
 	message := Message{
 		From: c.NodeAddress(),
@@ -574,7 +601,7 @@ func (c *Node) CountStateAfterBlock(address string, transactions []Transaction) 
 	return nil
 }
 
-func (c *Node) insertGenesis() {
+func (c *Node) InsertGenesis() {
 	block := c.genesis.ToBlock()
 	c.state.Lock()
 
@@ -587,14 +614,14 @@ func (c *Node) insertGenesis() {
 	c.AddBlock(block)
 }
 
-func (c *Node) insertBlock(b Block) error {
+func (c *Node) insertBlock(ctx context.Context, b Block) error {
 	for _, tr := range b.Transactions {
 		hash, err := tr.Hash()
 		if err != nil {
 			return err
 		}
 
-		c.transactionNonce.AddNonce(tr.GetSenderAddress())
+		c.TransactionNonce.SetNonce(tr.GetSenderAddress(), tr.GetNonce())
 		c.DeleteTransaction(hash)
 	}
 
@@ -612,7 +639,7 @@ func (c *Node) PrepareTransactions() ([]Transaction, error) {
 	for _, tr := range c.transactionPool {
 		from := tr.GetSenderAddress()
 
-		if c.transactionNonce.Compare(from, tr.GetNonce()) < 0 {
+		if c.TransactionNonce.Compare(from, tr.GetNonce()) < 0 {
 			continue
 		}
 

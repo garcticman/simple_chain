@@ -27,9 +27,9 @@ func (tn *TransactionNonce) GetNonce(address string) uint64 {
 	return nonce
 }
 
-func (tn *TransactionNonce) AddNonce(address string) {
+func (tn *TransactionNonce) SetNonce(address string, nonce uint64) {
 	tn.Lock()
-	tn.usersNonce[address]++
+	tn.usersNonce[address] = nonce
 	tn.Unlock()
 }
 

@@ -28,9 +28,9 @@ func (v *Validators) RemoveValidator(key ed25519.PublicKey) error {
 
 func (v *Validators) FindValidatorByPubKey(key ed25519.PublicKey) (uint64, error) {
 	index := sort.Search(len(v.pubKeys), func(i int) bool {
-		return bytes.Compare(v.pubKeys[i], key) >= 0
+		return bytes.Compare(key, v.pubKeys[i]) <= 0
 	})
-	if index == len(v.pubKeys) {
+	if index == len(v.pubKeys) || bytes.Compare(key, v.pubKeys[index]) != 0 {
 		return 0, errors.New("validator not exist")
 	}
 
